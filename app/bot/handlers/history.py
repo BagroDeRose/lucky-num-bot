@@ -51,7 +51,7 @@ async def cb_history_view(callback: CallbackQuery, session: AsyncSession, user: 
     analysis_id = int(data.split(":", 1)[1])
     analysis = await repo.get_analysis(session, analysis_id, user.id)
     if analysis is None:
-        await callback.answer("Анализ не найден.", show_alert=True)
+        await callback.answer(texts.ANALYSIS_NOT_FOUND, show_alert=True)
         return
 
     if analysis.paid and analysis.report:

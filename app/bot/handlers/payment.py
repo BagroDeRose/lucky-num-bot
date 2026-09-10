@@ -101,7 +101,7 @@ async def cb_get_report(callback: CallbackQuery, session: AsyncSession, user: Us
     analysis_id = int(data.split(":", 1)[1])
     analysis = await repo.get_analysis(session, analysis_id, user.id)
     if analysis is None:
-        await cb_answer(callback, "Анализ не найден.")
+        await cb_answer(callback, texts.ANALYSIS_NOT_FOUND)
         return
 
     await repo.log_event(session, user.id, "payment_clicked", {"analysis_id": analysis.id})
@@ -171,7 +171,7 @@ async def cb_yookassa_check(callback: CallbackQuery, session: AsyncSession, user
     analysis_id = int(data.split(":", 1)[1])
     analysis = await repo.get_analysis(session, analysis_id, user.id)
     if analysis is None:
-        await cb_answer(callback, "Анализ не найден.")
+        await cb_answer(callback, texts.ANALYSIS_NOT_FOUND)
         return
 
     if analysis.paid:
@@ -180,13 +180,13 @@ async def cb_yookassa_check(callback: CallbackQuery, session: AsyncSession, user
 
     pending = await repo.get_latest_pending_payment(session, analysis_id, user.id)
     if pending is None:
-        await cb_answer(callback, "Платёж не найден, попробуйте ещё раз.")
+        await cb_answer(callback, texts.PAYMENT_NOT_FOUND)
         return
 
     provider = payment_service.provider
     if not isinstance(provider, YooKassaPaymentProvider):
         # Defensive: this callback only makes sense while PAYMENT_PROVIDER=yookassa.
-        await cb_answer(callback, "Недоступно.")
+        await cb_answer(callback, texts.PAYMENT_PROVIDER_UNAVAILABLE)
         return
 
     try:
@@ -233,12 +233,12 @@ async def cb_mock_pay(callback: CallbackQuery, session: AsyncSession, user: User
     analysis_id = int(data.split(":", 1)[1])
     analysis = await repo.get_analysis(session, analysis_id, user.id)
     if analysis is None:
-        await cb_answer(callback, "Анализ не найден.")
+        await cb_answer(callback, texts.ANALYSIS_NOT_FOUND)
         return
 
     pending = await repo.get_latest_pending_payment(session, analysis_id, user.id)
     if pending is None:
-        await cb_answer(callback, "Платёж не найден, попробуйте ещё раз.")
+        await cb_answer(callback, texts.PAYMENT_NOT_FOUND)
         return
 
     payment = await payment_service.confirm_payment(
@@ -250,7 +250,7 @@ async def cb_mock_pay(callback: CallbackQuery, session: AsyncSession, user: User
         },
     )
     if payment is None:
-        await cb_answer(callback, "Не удалось подтвердить оплату.")
+        await cb_answer(callback, texts.PAYMENT_CONFIRM_FAILED)
         return
 
     await repo.mark_analysis_paid(session, analysis)
@@ -275,7 +275,7 @@ async def process_pre_checkout(pre_checkout_query: PreCheckoutQuery, session: As
     if payment is None:
         logger.warning("pre_checkout_query for unknown invoice payload: %s", payload)
         await pre_checkout_query.answer(
-            ok=False, error_message="Счёт устарел или недействителен. Попробуйте оформить оплату заново."
+            ok=False, error_message=texts.INVOICE_EXPIRED
         )
         return
 
@@ -291,7 +291,7 @@ async def process_pre_checkout(pre_checkout_query: PreCheckoutQuery, session: As
         await repo.mark_payment_failed(session, payment)
         await session.commit()
         await pre_checkout_query.answer(
-            ok=False, error_message="Этот счёт уже недействителен. Попробуйте оформить оплату заново."
+            ok=False, error_message=texts.INVOICE_NO_LONGER_VALID
         )
         return
 
@@ -338,7 +338,7 @@ async def cb_retry_report(callback: CallbackQuery, session: AsyncSession, user: 
     analysis_id = int(data.split(":", 1)[1])
     analysis = await repo.get_analysis(session, analysis_id, user.id)
     if analysis is None or not analysis.paid:
-        await cb_answer(callback, "Анализ не найден.")
+        await cb_answer(callback, texts.ANALYSIS_NOT_FOUND)
         return
 
     await _deliver_report(_callback_sender(callback), session, analysis, user)

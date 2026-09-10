@@ -47,11 +47,11 @@ def test_fallback_report_does_not_contain_disclaimer() -> None:
 def test_fallback_report_shows_all_four_scores_and_overall() -> None:
     result = analyze("2200373")
     report = render_fallback_full_report(result)
-    assert f"Денежный потенциал: {result.money_score}/10" in report
-    assert f"Энергия удачи: {result.luck_score}/10" in report
-    assert f"Энергия роста: {result.growth_score}/10" in report
-    assert f"Стабильность: {result.stability_score}/10" in report
-    assert f"Общий показатель: {result.overall_score}/100" in report
+    assert f"Денежный профиль — {result.money_score}/10" in report
+    assert f"Профиль удачи — {result.luck_score}/10" in report
+    assert f"Профиль роста — {result.growth_score}/10" in report
+    assert f"Профиль стабильности — {result.stability_score}/10" in report
+    assert f"Итог — {result.overall_score}/100" in report
 
 
 def test_fallback_report_never_exposes_raw_score_contributions() -> None:
@@ -65,59 +65,115 @@ def test_fallback_report_never_exposes_raw_score_contributions() -> None:
     assert "effect" not in report.lower()
 
 
-def test_fallback_report_digit_by_digit_section_lists_every_digit_in_order() -> None:
+def test_fallback_report_digit_story_mentions_every_digit_meaning_in_order() -> None:
+    """The digit-by-digit section is a flowing narrative paragraph (not a
+    one-line-per-digit list), but every digit's meaning must still appear,
+    in the same order the digits occur in the number.
+    """
+    from app.analysis.interpreter import _digit_runs  # noqa: SLF001
+    from app.analysis.rules import DIGIT_MEANINGS
+
     result = analyze("2200373")
     report = render_fallback_full_report(result)
 
     lines = report.splitlines()
-    start = lines.index("🔎 <b>Что рассказывают цифры</b>") + 1
-    digit_lines = []
-    for line in lines[start:]:
-        if line == "":
-            break
-        digit_lines.append(line)
+    start = lines.index("🔎 <b>История цифр</b>") + 1
+    story = lines[start]
 
-    assert len(digit_lines) == len(result.digits)
-    for digit, line in zip(result.digits, digit_lines, strict=True):
-        assert line.startswith(f"{digit} —")
+    # Adjacent repeats (a "run") are merged into a single mention, so check
+    # per-run, not per-raw-digit — and search forward from the previous
+    # match so a digit returning later (a legitimately repeated meaning)
+    # doesn't fool the ordering check by matching its first occurrence.
+    positions = []
+    search_from = 0
+    for digit, _count in _digit_runs(result.digits):
+        pos = story.index(DIGIT_MEANINGS[digit], search_from)
+        positions.append(pos)
+        search_from = pos + 1
+    assert positions == sorted(positions)  # meanings appear in digit order
 
 
-def test_fallback_report_flags_repeated_digits() -> None:
-    """555555: digit 5 repeats 6 times — every one of its six lines in the
-    digit-by-digit section must note the repetition.
+def test_fallback_report_flags_adjacent_repeated_digits() -> None:
+    """2200373 has two adjacent-repeat runs ("22" and "00") — both must be
+    called out as reinforcing their theme.
     """
-    result = analyze("555555")
+    result = analyze("2200373")
     report = render_fallback_full_report(result)
+    assert result.repeated_pairs == ["22", "00"]
+    assert report.count("и повтор явно усиливает эту тему") == 2
 
-    assert result.repeated_digits == [5]
-    repeat_note_count = report.count("эта тема усиливается за счёт повторения")
-    assert repeat_note_count == 6
+
+def test_fallback_report_flags_a_non_adjacent_returning_digit() -> None:
+    """5311898: digit 8 appears twice, not adjacently — the second
+    occurrence must be flagged as the theme returning.
+    """
+    result = analyze("5311898")
+    assert result.digit_frequency[8] == 2
+    report = render_fallback_full_report(result)
+    assert "Эта тема здесь уже не впервые." in report
 
 
 def test_fallback_report_normal_mixed_number_has_no_repetition_notes() -> None:
     result = analyze("1928374")
     report = render_fallback_full_report(result)
     assert result.repeated_digits == []
-    assert "эта тема усиливается за счёт повторения" not in report
+    assert result.repeated_pairs == []
+    assert "повтор явно усиливает эту тему" not in report
+    assert "уже не впервые" not in report
+
+
+def test_fallback_report_extreme_repetition_dominates_555555() -> None:
+    """The dominant fact for 555555 (all six digits identical) must lead
+    the report, not read like an ordinary repeated pair.
+    """
+    result = analyze("555555")
+    report = render_fallback_full_report(result)
+    assert "все шесть цифр" in report.lower() or "шесть цифр номера" in report.lower()
+    assert "единственная тема" in report or "единственный, доминирующий мотив" in report
+    # The extreme case must explicitly connect to the reduced number too.
+    assert str(result.reduced_number) in report
 
 
 def test_fallback_report_special_section_present_only_when_patterns_exist() -> None:
     repetitive = analyze("555555")
     assert repetitive.detected_patterns  # sanity: this number does have patterns
     report_with_patterns = render_fallback_full_report(repetitive)
-    assert "✨ <b>Особые знаки</b>" in report_with_patterns
+    assert "✨ <b>Особые сочетания</b>" in report_with_patterns
 
     mixed = analyze("1928374")
     report_mixed = render_fallback_full_report(mixed)
     if not mixed.detected_patterns and not mixed.repeated_digits and not mixed.repeated_pairs:
-        assert "✨ <b>Особые знаки</b>" not in report_mixed
+        assert "✨ <b>Особые сочетания</b>" not in report_mixed
 
 
-def test_fallback_report_mentions_every_detected_pattern_description() -> None:
+def test_fallback_report_special_section_reflects_actual_pattern_types() -> None:
+    """Rather than printing the raw pattern.description strings verbatim
+    (too generic/weak per product direction), the special section must
+    still faithfully reflect which pattern TYPES were actually detected —
+    no inventing, no omitting.
+    """
+    result = analyze("555555")
+    pattern_names = {p.name for p in result.detected_patterns}
+    assert "single_digit_number" in pattern_names
+    assert "palindrome" in pattern_names
+
+    report = render_fallback_full_report(result)
+    special_start = report.index("✨ <b>Особые сочетания</b>")
+    special_section = report[special_start:]
+
+    assert "держится на одной цифре" in special_section
+    assert "читается одинаково в обе стороны" in special_section
+
+
+def test_fallback_report_special_section_does_not_duplicate_weak_pair_language_for_dominant_number() -> None:
+    """For a number entirely made of one digit, every adjacent pair is
+    trivially identical — the special section must lead with the real
+    dominant fact, not also pad in a generic "pair adds an accent" line.
+    """
     result = analyze("555555")
     report = render_fallback_full_report(result)
-    for pattern in result.detected_patterns:
-        assert pattern.description in report
+    assert "создаёт визуальный" not in report
+    assert "добавляет уникальности" not in report
 
 
 def test_fallback_report_html_is_well_formed_and_safe() -> None:

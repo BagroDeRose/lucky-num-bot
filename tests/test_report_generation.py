@@ -57,8 +57,8 @@ async def test_generate_report_with_fallback_never_raises(sample_result, monkeyp
     assert "развлекательная" not in text.lower()
     assert "не является финансовым" not in text.lower()
     # But it must still read as a full, structured report, not a bare stub.
-    assert "Денежный потенциал" in text
-    assert "Общий показатель" in text
+    assert "Денежный профиль" in text
+    assert "Итог" in text
     assert f"{sample_result.overall_score}/100" in text
 
 

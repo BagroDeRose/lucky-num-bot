@@ -5,17 +5,19 @@ banknote serial numbers. Users submit a serial number, get a free teaser
 result from a deterministic scoring engine, and can purchase a full
 AI-narrated personalized report.
 
-🇷🇺 **О проекте (кратко):** LuckyNum — развлекательный Telegram-бот
-«Денежный номер». Пользователь присылает серийный номер купюры, получает
-бесплатный предварительный результат на основе детерминированного
-алгоритма, а за небольшую плату — полный персональный отчёт, сгенерированный
-AI на основе уже посчитанных данных. Это развлекательный продукт: результаты
-не являются финансовым советом или научным прогнозом.
+🇷🇺 **О проекте (кратко):** LuckyNum — Telegram-бот «Денежный номер».
+Пользователь присылает серийный номер купюры, получает бесплатный
+предварительный результат на основе детерминированного алгоритма, а за
+небольшую плату — полный персональный разбор, сгенерированный AI на основе
+уже посчитанных данных.
 
-> **Entertainment disclaimer**: LuckyNum is an entertainment product. It
-> never claims that numerology is scientifically predictive, that a banknote
-> "causes" wealth or luck, or that results constitute financial advice. All
-> AI-generated copy is instructed to reinforce this.
+> **Product positioning**: LuckyNum presents its numerology reading as a
+> confident, symbolic interpretation — it never phrases anything as a
+> guaranteed real-world outcome (results are framed as tendencies and
+> possibilities, e.g. "тяготеет к...", never "принесёт деньги"). By
+> deliberate product decision, the bot's copy does not carry an
+> "entertainment only" / "not financial advice" disclaimer footer — see
+> app/bot/texts.py and app/ai/prompts.py.
 
 ---
 
@@ -27,7 +29,7 @@ AI на основе уже посчитанных данных. Это разв
    and four bounded sub-scores (money / luck / growth / stability) plus an
    overall 0–100 score, with a full explainable breakdown.
 4. The bot shows a **free teaser** — interesting, but deliberately partial.
-5. User taps "Получить полный отчёт" and pays (mock provider locally, real
+5. User taps "Открыть полный разбор" and pays (mock provider locally, real
    Telegram Payments, or YooKassa, depending on configuration).
 6. On confirmed payment, the structured analysis is handed to OpenAI, which
    narrates it into a polished report — **the AI never computes anything**,
@@ -93,7 +95,7 @@ scoring logic, SQL, or prompt text themselves.
   reports are cached so retries never re-trigger OpenAI calls.
 - Lightweight funnel-analytics event log + a CLI to summarize it.
 - `/history` with per-user, ownership-scoped access to past analyses.
-- Alembic migrations, async SQLAlchemy 2.x, pytest suite (160+ tests), ruff +
+- Alembic migrations, async SQLAlchemy 2.x, pytest suite (170+ tests), ruff +
   mypy clean.
 
 ## Requirements
@@ -179,7 +181,7 @@ closes the bot session).
 pytest
 ```
 
-160+ tests cover: input validation, deterministic scoring/pattern detection
+170+ tests cover: input validation, deterministic scoring/pattern detection
 and score bounds (including a regression test against digit-frequency
 double-counting), algorithm determinism, repository operations (including
 user-scoped access control and SQLite foreign-key enforcement), payment
@@ -280,10 +282,13 @@ DB schema) is provider-agnostic and would not need to change.
 ## OpenAI configuration
 
 - `OPENAI_API_KEY` and `OPENAI_MODEL` in `.env`.
-- Prompts live in `app/ai/prompts.py`. The system prompt defines a fixed,
-  premium report structure (hook → main number walkthrough → digit-by-digit
-  story → detected patterns → four profile sections → verdict), requires
-  Telegram HTML (`<b>`/`<i>`) rather than Markdown, and forbids exposing raw
+- Prompts live in `app/ai/prompts.py`. The system prompt's *instructions*
+  are written in English (models tend to follow structured instructions
+  more reliably that way) but explicitly require **Russian** output. It
+  defines a fixed, premium report structure (hook → main number walkthrough
+  → digit-by-digit story → detected patterns → four profile sections →
+  verdict), requires Telegram HTML (`<b>`/`<i>`) rather than Markdown, bans
+  a short list of overused filler words/phrases, and forbids exposing raw
   scoring mechanics or guaranteeing outcomes — while explicitly *not* adding
   an "entertainment only" disclaimer footer (a deliberate product choice).
 - `app.ai.report_generator._build_ai_payload()` curates what the model ever
@@ -298,8 +303,8 @@ DB schema) is provider-agnostic and would not need to change.
   outside `app.bot` despite being Telegram-specific.
 - If the API call fails or the key is missing, `generate_report` raises
   `ReportGenerationError`; the payment handler catches this, keeps the paid
-  state intact, and offers a "🔄 Повторить генерацию отчёта" retry button —
-  a paying user is never left without recourse.
+  state intact, and offers a "🔄 Попробовать ещё раз" retry button — a
+  paying user is never left without recourse.
 - `generate_report_with_fallback` (used where a guaranteed non-empty result
   is preferred over a retry prompt) falls back to a plain deterministic
   report template (`interpreter.render_fallback_full_report`) that mirrors

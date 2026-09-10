@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.analysis.engine import analyze
+from app.bot import texts
 from app.bot.handlers import payment as payment_module
 from app.bot.handlers.payment import cb_get_report, cb_yookassa_check, process_pre_checkout
 from app.database import repositories as repo
@@ -157,7 +158,7 @@ async def test_yookassa_check_reports_not_confirmed_while_pending(
     assert analysis.paid is False
     # a "not confirmed yet" message was sent, not a report
     sent_texts = [c.args[1] for c in callback.bot.send_message.await_args_list]
-    assert any("не подтверждена" in t for t in sent_texts)
+    assert texts.YOOKASSA_PAYMENT_NOT_CONFIRMED in sent_texts
 
 
 async def test_yookassa_check_unlocks_report_when_succeeded(
@@ -204,7 +205,7 @@ async def test_yookassa_check_cannot_access_another_users_analysis(
     # regular message via cb_answer (see cb_get_report's docstring for why).
     callback.answer.assert_awaited_once_with()
     sent_texts = [c.args[1] for c in callback.bot.send_message.await_args_list]
-    assert "Анализ не найден." in sent_texts
+    assert texts.ANALYSIS_NOT_FOUND in sent_texts
     await session.refresh(payment)
     assert payment.status == "pending"
 
@@ -264,7 +265,7 @@ async def test_get_report_shows_friendly_error_when_payment_creation_fails(
     await cb_get_report(callback, session, user)
 
     sent_texts = [c.args[1] for c in callback.bot.send_message.await_args_list]
-    assert any("технические неполадки" in t for t in sent_texts)
+    assert texts.YOOKASSA_PAYMENT_ERROR in sent_texts
 
     # No payment row should have been left behind by the failed attempt.
     pending = await repo.get_latest_pending_payment(session, analysis.id, user.id)
@@ -381,7 +382,7 @@ async def test_get_report_handles_timeout_without_leaving_stale_payment(
     callback.answer.assert_awaited_once_with()  # acknowledged despite the timeout
 
     sent_texts = [c.args[1] for c in callback.bot.send_message.await_args_list]
-    assert any("технические неполадки" in t for t in sent_texts)
+    assert texts.YOOKASSA_PAYMENT_ERROR in sent_texts
     # Must never imply the credentials themselves are wrong — this was a
     # timeout, not an authentication failure.
     assert not any("credential" in t.lower() or "ключ" in t.lower() for t in sent_texts)

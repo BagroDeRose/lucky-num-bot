@@ -25,7 +25,7 @@ def teaser_kb(analysis_id: int) -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="🔮 Получить полный отчёт", callback_data=f"get_report:{analysis_id}"
+                    text="🔮 Открыть полный разбор", callback_data=f"get_report:{analysis_id}"
                 )
             ],
             [InlineKeyboardButton(text="🔁 Проверить другую купюру", callback_data="analyze_new")],
@@ -80,7 +80,7 @@ def retry_report_kb(analysis_id: int) -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="🔄 Повторить генерацию отчёта",
+                    text="🔄 Попробовать ещё раз",
                     callback_data=f"retry_report:{analysis_id}",
                 )
             ]

@@ -2,142 +2,443 @@
 
 Used for the free teaser (always) and as a fallback full report if the AI
 report generator is temporarily unavailable — a paying user must never be
-left with nothing. All text here is our own fixed Russian copy (the only
-interpolated values are digits/scores), so it's safe to embed Telegram HTML
-tags directly without running it through app.formatting.to_telegram_html.
+left with nothing. Everything here is built from facts already present on
+AnalysisResult (digits, frequency, repeated_digits/pairs, detected_patterns,
+scores) — nothing is invented, and the scoring engine itself is never
+touched or recomputed, only narrated. All text is our own fixed Russian
+copy (the only interpolated values are digits/scores), so it's safe to
+embed Telegram HTML tags directly without running it through
+app.formatting.to_telegram_html.
 """
 
 from __future__ import annotations
 
 from app.analysis.models import AnalysisResult
-from app.analysis.rules import DIGIT_MEANINGS
+from app.analysis.rules import BASE_DIGIT_PROFILE, DIGIT_MEANINGS, SCORE_CATEGORIES
 
-_MONEY_STRENGTH_LABELS = (
-    (8, "исключительная"),
-    (6, "сильная"),
-    (4, "умеренная"),
-    (0, "слабая"),
-)
+# --- shared helpers ---------------------------------------------------
 
-# Used for the fallback report's profile sections — a generic but non-robotic
-# strength phrase per score. The AI-generated report does this far more
-# richly and specifically; this is only the deterministic safety net.
-_STRENGTH_PHRASES = (
-    (8, "ярко выражена в этом номере"),
-    (6, "заметно проявлена в этом номере"),
-    (4, "присутствует в умеренной степени"),
-    (0, "выражена мягко, на фоне остального"),
-)
+_COUNT_WORDS = {2: "две", 3: "три", 4: "четыре", 5: "пять", 6: "шесть", 7: "семь", 8: "восемь", 9: "девять"}
 
 
-def _strength_label(score: int) -> str:
-    for threshold, label in _MONEY_STRENGTH_LABELS:
-        if score >= threshold:
-            return label
-    return "слабая"
+def _count_phrase(n: int) -> str:
+    word = _COUNT_WORDS.get(n, str(n))
+    noun = "цифры" if n in (2, 3, 4) else "цифр"
+    return f"{word} {noun}"
 
 
-def _strength_phrase(score: int) -> str:
-    for threshold, phrase in _STRENGTH_PHRASES:
-        if score >= threshold:
-            return phrase
-    return _STRENGTH_PHRASES[-1][1]
+def _capitalize(text: str) -> str:
+    return text[0].upper() + text[1:] if text else text
+
+
+def _digit_runs(digits: list[int]) -> list[tuple[int, int]]:
+    """Collapse consecutive identical digits into (digit, run_length) pairs,
+    e.g. [5, 3, 1, 1, 8] -> [(5, 1), (3, 1), (1, 2), (8, 1)].
+    """
+    runs: list[tuple[int, int]] = []
+    for d in digits:
+        if runs and runs[-1][0] == d:
+            prev_digit, prev_count = runs[-1]
+            runs[-1] = (prev_digit, prev_count + 1)
+        else:
+            runs.append((d, 1))
+    return runs
+
+
+def _dominant_categories(digit: int) -> set[str]:
+    """Category name(s) where `digit` scores highest in the rule book's base
+    profile — the same static table the real scoring engine reads from.
+    A read-only lookup, not a re-implementation of the scoring formula.
+    """
+    profile = BASE_DIGIT_PROFILE[digit]
+    top = max(profile)
+    return {cat for cat, value in zip(SCORE_CATEGORIES, profile, strict=True) if value == top}
+
+
+# --- free teaser --------------------------------------------------------
+
+
+def _teaser_finding(result: AnalysisResult) -> str:
+    """One concrete, specific observation — never a generic filler line."""
+    pattern_names = {p.name for p in result.detected_patterns}
+
+    if "single_digit_number" in pattern_names:
+        digit = result.digits[0]
+        return f"Бросается в глаза сразу: весь номер держится на одной цифре — {digit}."
+    if result.repeated_digits:
+        digit = result.repeated_digits[0]
+        count = result.digit_frequency.get(digit, 0)
+        return f"Один момент выделяется сразу: цифра {digit} встречается в номере {count} раза."
+    if "palindrome" in pattern_names:
+        return "Один момент выделяется сразу: номер читается одинаково в обе стороны."
+    if result.repeated_pairs:
+        return f"Один момент выделяется сразу: в номере повторяется пара «{result.repeated_pairs[0]}»."
+    return "В комбинации уже заметен характер, но чтобы понять его до конца, нужно распутать все цифры вместе."
 
 
 def render_teaser(result: AnalysisResult) -> str:
-    """Free teaser message shown after analysis, before payment.
+    """Free teaser shown after analysis, before payment.
 
-    Answers "what's the main number and what's the basic impression?" —
-    deliberately leaves the digit-by-digit story, detected patterns, and
-    the other three profiles for the paid report.
+    Answers "what's the main number and what's the first interesting
+    thing about it?" — deliberately stops there and leaves the digit-by-
+    digit story, patterns, and the four profiles for the paid report.
     """
-    money_strength = _strength_label(result.money_score)
-
-    highlight = ""
-    if result.repeated_digits or result.repeated_pairs or result.detected_patterns:
-        highlight = (
-            "\n✨ В номере есть повторяющиеся элементы — в полном разборе "
-            "видно, какие именно и что они символизируют."
-        )
-
     lines = [
-        "💰 Ваша купюра проанализирована.",
-        f"🔢 Главное число: <b>{result.reduced_number}</b>",
-        f"💵 Денежная символика: {money_strength}",
-        highlight.strip(),
+        "🔮 Купюра проверена.",
+        f"Главное число — <b>{result.reduced_number}</b>.",
         "",
-        f"🏆 Предварительный балл: {result.overall_score}/100",
+        _teaser_finding(result),
         "",
-        "🔮 Хотите узнать полный разбор — что рассказывают отдельные цифры, "
-        "какие узоры скрыты в номере и какую купюру стоит оставить себе как "
-        "денежный талисман?",
+        f"Предварительный балл: {result.overall_score}/100.",
+        "",
+        "Это только верхний слой — полный разбор покажет, как цифры "
+        "складываются в единую картину, и что в номере про деньги, удачу, "
+        "рост и стабильность.",
     ]
     return "\n".join(line for line in lines if line != "")
+
+
+# --- fallback full report ------------------------------------------------
+
+_MID_CONNECTORS_SINGULAR = ("Дальше идёт", "Следом", "Затем появляется", "После этого")
+_MID_CONNECTORS_PLURAL = ("Дальше идут", "Следом", "Затем появляются", "После этого")
+
+
+def _render_opening(result: AnalysisResult) -> str:
+    pattern_names = {p.name for p in result.detected_patterns}
+
+    if "single_digit_number" in pattern_names:
+        digit = result.digits[0]
+        return (
+            f"Здесь не приходится гадать, что в номере главное: он весь состоит "
+            f"из одной цифры — {digit}."
+        )
+    if result.repeated_digits:
+        digit = result.repeated_digits[0]
+        count = result.digit_frequency.get(digit, 0)
+        return f"Цифра {digit} явно доминирует в этой комбинации — она встречается {count} раза."
+    if "palindrome" in pattern_names:
+        return "Этот номер — палиндром: он читается одинаково в обе стороны, и такая симметрия встречается нечасто."
+    if result.repeated_pairs:
+        pair = result.repeated_pairs[0]
+        return f"В номере есть небольшая, но заметная деталь — повторяющаяся пара «{pair}»."
+    return (
+        f"На первый взгляд номер выглядит просто набором цифр, но у него есть "
+        f"чёткий центр тяжести — главное число {result.reduced_number}."
+    )
+
+
+def _render_main_number(result: AnalysisResult) -> str:
+    digit_sum = result.digit_sum
+    reduced = result.reduced_number
+    meaning = DIGIT_MEANINGS[reduced]
+
+    calc_lines = [" + ".join(str(d) for d in result.digits) + f" = {digit_sum}"]
+    if digit_sum >= 10:
+        calc_lines.append(" + ".join(str(d) for d in str(digit_sum)) + f" = {reduced}")
+
+    interpretation = (
+        f"Так получается главное число — {reduced}. "
+        f"{_capitalize(meaning)} — вот что оно вносит в характер всей комбинации."
+    )
+    return "\n".join(calc_lines) + "\n\n" + interpretation
+
+
+def _render_digit_story(result: AnalysisResult) -> str:
+    digits = result.digits
+
+    if len(set(digits)) == 1:
+        digit = digits[0]
+        meaning = DIGIT_MEANINGS[digit]
+        reduced = result.reduced_number
+        if reduced == digit:
+            bridge = (
+                f"Даже после свёртки суммы цифр главным остаётся то же число — "
+                f"{reduced}: тема держится на всех уровнях номера, не только на поверхности."
+            )
+        else:
+            bridge = (
+                f"При этом сумма всех цифр сводится к другому числу — {reduced} "
+                f"({DIGIT_MEANINGS[reduced]}). Получается наложение: {digit} задаёт фон "
+                f"по всей длине номера, а {reduced} выходит на первый план как итог."
+            )
+        return (
+            f"{_capitalize(_count_phrase(len(digits)))} номера — {digit}. "
+            f"{_capitalize(meaning)} — не эпизод, а единственная тема всей "
+            f"комбинации, без пауз и отвлечений. {bridge}"
+        )
+
+    runs = _digit_runs(digits)
+    seen: set[int] = set()
+    sentences: list[str] = []
+    # Cap how many times the "this theme is back" note fires — on a long,
+    # heavily-repeating number it would otherwise chant the same phrase
+    # many times over, which is exactly the repetition this report design
+    # is meant to avoid.
+    returning_notes_used = 0
+    max_returning_notes = 2
+
+    for i, (digit, count) in enumerate(runs):
+        meaning = DIGIT_MEANINGS[digit]
+        returning = digit in seen
+        seen.add(digit)
+        is_first = i == 0
+        is_last = i == len(runs) - 1
+
+        if count >= 2:
+            if is_first:
+                lead = f"Номер сразу заявляет о себе: {_count_phrase(count)} {digit} подряд"
+            elif is_last:
+                lead = f"Завершают комбинацию {_count_phrase(count)} {digit} подряд"
+            else:
+                connector = _MID_CONNECTORS_PLURAL[(i - 1) % len(_MID_CONNECTORS_PLURAL)]
+                lead = f"{connector} {_count_phrase(count)} {digit} подряд"
+            sentence = f"{lead} — {meaning}, и повтор явно усиливает эту тему."
+        else:
+            if is_first:
+                sentence = f"Номер начинается с цифры {digit} — {meaning}."
+            elif is_last:
+                sentence = f"Замыкает комбинацию цифра {digit} — {meaning}."
+            else:
+                connector = _MID_CONNECTORS_SINGULAR[(i - 1) % len(_MID_CONNECTORS_SINGULAR)]
+                sentence = f"{connector} цифра {digit} — {meaning}."
+            if returning and returning_notes_used < max_returning_notes:
+                sentence += " Эта тема здесь уже не впервые."
+                returning_notes_used += 1
+
+        sentences.append(sentence)
+
+    return " ".join(sentences)
+
+
+def _render_special_section(result: AnalysisResult) -> str | None:
+    """Only meaningful, real structural findings — never a generic "adds a
+    visual accent" filler. Returns None if there's genuinely nothing to say.
+    """
+    pattern_names = {p.name for p in result.detected_patterns}
+    lines: list[str] = []
+
+    if "single_digit_number" in pattern_names:
+        digit = result.digits[0]
+        lines.append(
+            f"Весь номер держится на одной цифре — {digit}. Это не рядовое "
+            "повторение, а единственный, доминирующий мотив всей комбинации."
+        )
+    else:
+        for digit in result.repeated_digits:
+            count = result.digit_frequency.get(digit, 0)
+            lines.append(
+                f"Цифра {digit} встречается в номере {count} раза — заметная "
+                f"концентрация, которая выводит тему «{DIGIT_MEANINGS[digit]}» "
+                "в число ведущих в этой комбинации."
+            )
+        if result.repeated_pairs:
+            pairs_str = ", ".join(f"«{p}»" for p in result.repeated_pairs)
+            lines.append(f"В номере повторяются соседние цифры: {pairs_str}.")
+
+    if "palindrome" in pattern_names:
+        lines.append(
+            "Номер читается одинаково в обе стороны — редкая структурная "
+            "симметрия, которая обычно читается как знак равновесия."
+        )
+    if "ascending_sequence" in pattern_names:
+        lines.append("В номере есть возрастающая последовательность цифр — явный мотив движения вперёд.")
+    if "descending_sequence" in pattern_names:
+        lines.append("В номере есть убывающая последовательность цифр — мотив завершения цикла.")
+
+    if not lines:
+        return None
+    return "\n".join(f"• {line}" for line in lines)
+
+
+_STRENGTH_PHRASES: dict[str, tuple[tuple[int, str], ...]] = {
+    "money": (
+        (8, "Денежная тема здесь явно ведущая."),
+        (6, "Денежная тема выражена заметно."),
+        (4, "Денежная тема присутствует, но не доминирует."),
+        (0, "Денежная тема здесь скорее фоновая."),
+    ),
+    "luck": (
+        (8, "Такой номер обычно связывают с везением, которое приходит внезапно."),
+        (6, "Элемент везения здесь заметен."),
+        (4, "Везение здесь скорее эпизодическое, чем постоянное."),
+        (0, "Тема удачи выражена мягко."),
+    ),
+    "growth": (
+        (8, "Это номер про движение: рост, перемены, новые направления."),
+        (6, "Тема роста здесь заметна."),
+        (4, "Рост присутствует в умеренной степени."),
+        (0, "Динамики в этой комбинации немного."),
+    ),
+    "stability": (
+        (8, "Номер явно тяготеет к порядку и предсказуемости."),
+        (6, "Стабильность — заметная черта этой комбинации."),
+        (4, "Баланс между переменами и постоянством."),
+        (0, "Этот номер скорее про движение, чем про стабильность."),
+    ),
+}
+
+
+def _strength_phrase(category: str, score: int) -> str:
+    for threshold, phrase in _STRENGTH_PHRASES[category]:
+        if score >= threshold:
+            return phrase
+    return _STRENGTH_PHRASES[category][-1][1]
+
+
+def _has_directional_theme(digit: int) -> bool:
+    """False only for digit 0 — its base profile is tied across all four
+    categories (see rules.py), so it has no specific theme to attribute a
+    profile to. Skipping it here mirrors the same exclusion the scoring
+    engine itself applies (an undirected digit shouldn't be credited with
+    driving a specific theme just by being the main number or repeating).
+    """
+    return len(_dominant_categories(digit)) < len(SCORE_CATEGORIES)
+
+
+def _profile_lead(result: AnalysisResult, category: str) -> str | None:
+    """A fact-grounded opening sentence for a profile, when a specific digit
+    (the main number or a repeated one) clearly drove that theme.
+    """
+    reduced = result.reduced_number
+    if _has_directional_theme(reduced) and category in _dominant_categories(reduced):
+        return (
+            f"Здесь многое определяет главное число {reduced}: "
+            f"{DIGIT_MEANINGS[reduced]}."
+        )
+
+    for digit in sorted(set(result.digits)):
+        if result.digit_frequency.get(digit, 0) < 2:
+            continue
+        if not _has_directional_theme(digit):
+            continue
+        if category in _dominant_categories(digit):
+            return (
+                f"Заметный вклад вносит цифра {digit} — она встречается в номере "
+                f"{result.digit_frequency[digit]} раза, а её тема "
+                f"(«{DIGIT_MEANINGS[digit]}») естественно проявляется здесь."
+            )
+    return None
+
+
+def _render_profile(result: AnalysisResult, category: str, score: int) -> str:
+    lead = _profile_lead(result, category)
+    strength = _strength_phrase(category, score)
+    if lead:
+        return f"{lead} {strength}"
+    return strength
+
+
+_STRONG_SUFFIX = {
+    "money": "с выраженной денежной темой",
+    "luck": "с явным акцентом на удачу",
+    "growth": "с сильной тягой к движению и росту",
+    "stability": "с выраженной тягой к порядку и стабильности",
+}
+_WEAK_SUFFIX = {
+    "money": "денежная тема выражена значительно спокойнее",
+    "luck": "тема удачи здесь в тени",
+    "growth": "рост и движение выражены мягче",
+    "stability": "стабильность выражена заметно слабее",
+}
+
+
+def _render_summary(result: AnalysisResult) -> str:
+    scores = {
+        "money": result.money_score,
+        "luck": result.luck_score,
+        "growth": result.growth_score,
+        "stability": result.stability_score,
+    }
+    best = max(scores, key=lambda k: scores[k])
+    worst = min(scores, key=lambda k: scores[k])
+
+    if scores[best] == scores[worst]:
+        return f"{result.overall_score}/100 — ровный, сбалансированный номер: ни одна тема здесь не перевешивает остальные."
+
+    return (
+        f"{result.overall_score}/100 — это номер {_STRONG_SUFFIX[best]}, "
+        f"тогда как {_WEAK_SUFFIX[worst]}."
+    )
+
+
+_VERDICTS: dict[str, tuple[str, ...]] = {
+    "money": (
+        "Деньги любят цифры, которые не сидят на месте — а здесь их явно в достатке.",
+        "Денежная тема здесь не случайный пассажир — она занимает место в первом ряду.",
+    ),
+    "luck": (
+        "Такие номера обычно ловят момент, а не ждут его.",
+        "Здесь удача скорее про внимательность, чем про везение вслепую.",
+    ),
+    "growth": (
+        "Этот номер не про паузы — он про то, что дальше.",
+        "Здесь чувствуется разгон: номер явно не про то, чтобы стоять на месте.",
+    ),
+    "stability": (
+        "Этот номер держит форму даже под давлением.",
+        "Здесь порядок не скучный, а надёжный.",
+    ),
+}
+
+
+def _render_verdict(result: AnalysisResult) -> str:
+    scores = {
+        "money": result.money_score,
+        "luck": result.luck_score,
+        "growth": result.growth_score,
+        "stability": result.stability_score,
+    }
+    best = max(scores, key=lambda k: scores[k])
+    options = _VERDICTS[best]
+    return options[result.overall_score % len(options)]
 
 
 def render_fallback_full_report(result: AnalysisResult) -> str:
     """Plain deterministic full report, used if the AI is unavailable.
 
-    Follows the same section structure as the AI-generated report, just
-    without the richer narrative prose an LLM provides — scores are always
-    shown as clean "X/10" figures with a short strength phrase, never as a
-    raw contribution breakdown.
+    Follows the same section structure and content philosophy as the AI
+    report — a personalized reading, not a generic dictionary — just
+    without the model's richer prose. Scores are always shown as clean
+    "X/10" figures with a grounded interpretation, never as a raw
+    contribution breakdown.
     """
-    meaning = DIGIT_MEANINGS[result.reduced_number]
-
     parts: list[str] = [
-        "🔮 <b>Денежный разбор купюры</b>",
+        "🔮 <b>Денежный разбор</b>",
         f"Серийный номер: <b>{result.normalized_number}</b>",
         "",
+        _render_opening(result),
+        "",
         f"🔢 <b>Главное число — {result.reduced_number}</b>",
-        " + ".join(str(d) for d in result.digits) + f" = {result.digit_sum}",
-    ]
-    if result.digit_sum >= 10:
-        parts.append(
-            " + ".join(str(d) for d in str(result.digit_sum)) + f" = {result.reduced_number}"
-        )
-    parts += [
-        f"Главное число символизирует: {meaning}.",
+        _render_main_number(result),
         "",
-        "🔎 <b>Что рассказывают цифры</b>",
+        "🔎 <b>История цифр</b>",
+        _render_digit_story(result),
     ]
 
-    for digit in result.digits:
-        suffix = " — эта тема усиливается за счёт повторения" if digit in result.repeated_digits else ""
-        parts.append(f"{digit} — {DIGIT_MEANINGS[digit]}{suffix}.")
-    parts.append("")
-
-    if result.repeated_digits or result.repeated_pairs or result.detected_patterns:
-        parts.append("✨ <b>Особые знаки</b>")
-        if result.repeated_digits:
-            digits_str = ", ".join(str(d) for d in result.repeated_digits)
-            parts.append(f"• Повторяющиеся цифры: {digits_str}.")
-        if result.repeated_pairs:
-            parts.append(f"• Повторяющиеся пары: {', '.join(result.repeated_pairs)}.")
-        for pattern in result.detected_patterns:
-            parts.append(f"• {pattern.description}")
-        parts.append("")
+    special = _render_special_section(result)
+    if special:
+        parts += ["", "✨ <b>Особые сочетания</b>", special]
 
     parts += [
-        "💰 <b>Денежная энергия</b>",
-        f"💰 Денежный потенциал: {result.money_score}/10",
-        f"Денежная энергия номера {_strength_phrase(result.money_score)}.",
         "",
-        "🍀 <b>Энергия удачи</b>",
-        f"🍀 Энергия удачи: {result.luck_score}/10",
-        f"Символика удачи {_strength_phrase(result.luck_score)}.",
+        f"💰 <b>Денежный профиль — {result.money_score}/10</b>",
+        _render_profile(result, "money", result.money_score),
         "",
-        "🌱 <b>Энергия роста</b>",
-        f"🌱 Энергия роста: {result.growth_score}/10",
-        f"Тема развития и движения {_strength_phrase(result.growth_score)}.",
+        f"🍀 <b>Профиль удачи — {result.luck_score}/10</b>",
+        _render_profile(result, "luck", result.luck_score),
         "",
-        "🛡 <b>Стабильность</b>",
-        f"🛡 Стабильность: {result.stability_score}/10",
-        f"Тяга к порядку и постоянству {_strength_phrase(result.stability_score)}.",
+        f"🌱 <b>Профиль роста — {result.growth_score}/10</b>",
+        _render_profile(result, "growth", result.growth_score),
         "",
-        "✨ <b>Итог</b>",
-        f"⭐ Общий показатель: {result.overall_score}/100",
-        f"Главная тема этого номера — {meaning}.",
+        f"🛡 <b>Профиль стабильности — {result.stability_score}/10</b>",
+        _render_profile(result, "stability", result.stability_score),
+        "",
+        f"⭐ <b>Итог — {result.overall_score}/100</b>",
+        _render_summary(result),
+        "",
+        "💥 <b>Вердикт Жмыха</b>",
+        _render_verdict(result),
     ]
 
     return "\n".join(parts)

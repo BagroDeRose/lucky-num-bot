@@ -131,11 +131,11 @@ def test_payload_is_json_serializable() -> None:
 
 
 def test_system_prompt_specifies_exact_score_line_formats() -> None:
-    assert "Денежный потенциал: {money_score}/10" in SYSTEM_PROMPT
-    assert "Энергия удачи: {luck_score}/10" in SYSTEM_PROMPT
-    assert "Энергия роста: {growth_score}/10" in SYSTEM_PROMPT
-    assert "Стабильность: {stability_score}/10" in SYSTEM_PROMPT
-    assert "Общий показатель: {overall_score}/100" in SYSTEM_PROMPT
+    assert "ДЕНЕЖНЫЙ ПРОФИЛЬ — {money_score}/10" in SYSTEM_PROMPT
+    assert "ПРОФИЛЬ УДАЧИ — {luck_score}/10" in SYSTEM_PROMPT
+    assert "ПРОФИЛЬ РОСТА — {growth_score}/10" in SYSTEM_PROMPT
+    assert "ПРОФИЛЬ СТАБИЛЬНОСТИ — {stability_score}/10" in SYSTEM_PROMPT
+    assert "ИТОГ — {overall_score}/100" in SYSTEM_PROMPT
 
 
 def test_system_prompt_forbids_markdown() -> None:
@@ -146,16 +146,36 @@ def test_system_prompt_forbids_markdown() -> None:
 
 
 def test_system_prompt_forbids_disclaimers() -> None:
-    assert "не является финансовым советом" in SYSTEM_PROMPT  # named as forbidden
-    assert "никогда не добавляй дисклеймеры" in SYSTEM_PROMPT.lower()
+    lowered = SYSTEM_PROMPT.lower()
+    assert "not financial advice" in lowered  # named as a forbidden example
+    assert "not scientific" in lowered
+    assert "disclaimer" in lowered
 
 
 def test_system_prompt_forbids_raw_scoring_mechanics_leakage() -> None:
     lowered = SYSTEM_PROMPT.lower()
-    assert "score_breakdown" in lowered
-    assert '"+1"' in SYSTEM_PROMPT or "+6" in SYSTEM_PROMPT  # cited as a forbidden example
+    assert "score_breakdown" not in lowered  # the payload excludes it; prompt need not name it
+    assert '"+n"' in lowered or "+n" in lowered  # cited as a forbidden example pattern
+    assert "internal factor" in lowered or "factor/rule names" in lowered
 
 
 def test_system_prompt_forbids_guaranteeing_outcomes() -> None:
     lowered = SYSTEM_PROMPT.lower()
-    assert "гарант" in lowered  # "гарантию" / "гарантировать" etc.
+    assert "guaranteed outcome" in lowered or "guarantee" in lowered
+
+
+def test_system_prompt_requires_russian_output() -> None:
+    lowered = SYSTEM_PROMPT.lower()
+    assert "russian" in lowered
+    assert "английск" not in lowered  # the instructions describe Russian output, not "English"
+
+
+def test_system_prompt_bans_overused_filler_words() -> None:
+    lowered = SYSTEM_PROMPT.lower()
+    for banned in ("энергия", "символизирует", "важность", "напоминает"):
+        assert banned in lowered  # named explicitly as words to avoid
+
+
+def test_system_prompt_requires_555555_style_numbers_to_lead_with_dominance() -> None:
+    lowered = SYSTEM_PROMPT.lower()
+    assert "dominance" in lowered or "dominat" in lowered
