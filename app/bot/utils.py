@@ -8,6 +8,7 @@ asserts across every handler.
 
 from __future__ import annotations
 
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
 
@@ -27,12 +28,24 @@ async def cb_answer(
 async def cb_edit_or_answer(
     callback: CallbackQuery, text: str, reply_markup: InlineKeyboardMarkup | None = None
 ) -> None:
-    """Edit the original message in place when possible, otherwise send a new one."""
+    """Edit the original message in place when possible, otherwise send a new one.
+
+    Telegram raises TelegramBadRequest("message is not modified") when the
+    requested text/markup is byte-for-byte identical to what's already
+    shown — e.g. a user taps "О проекте" twice in a row from the same menu.
+    That's a no-op from the user's point of view, not a failure, so it's
+    swallowed here rather than reaching the global error handler. Any other
+    TelegramBadRequest (a genuine problem) still propagates normally.
+    """
     message = callback.message
     if message is None or callback.bot is None:
         return
     if isinstance(message, Message):
-        await message.edit_text(text, reply_markup=reply_markup)
+        try:
+            await message.edit_text(text, reply_markup=reply_markup)
+        except TelegramBadRequest as exc:
+            if "message is not modified" not in exc.message.lower():
+                raise
     else:
         await callback.bot.send_message(message.chat.id, text, reply_markup=reply_markup)
 

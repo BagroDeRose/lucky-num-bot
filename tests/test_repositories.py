@@ -101,6 +101,62 @@ async def test_create_pending_payment_is_idempotent(session: AsyncSession) -> No
     assert p1.id == p2.id
 
 
+async def test_create_pending_payment_recovers_from_lost_race(
+    session: AsyncSession, monkeypatch
+) -> None:
+    """The "check for existing, then insert" pattern in create_pending_payment
+    is not atomic: two concurrent callers can both see "no existing row" and
+    both attempt to insert the same provider_payment_id. Only one insert can
+    win (UNIQUE constraint); the other must gracefully return the winner's
+    row instead of propagating an unhandled IntegrityError. This test forces
+    that exact race deterministically (no reliance on real concurrency
+    timing) by making the very first existence check lie.
+    """
+    user = await repo.get_or_create_user(session, telegram_id=7, username="r")
+    await session.flush()
+    result = analyze("2200373")
+    analysis = await repo.create_analysis(session, user_id=user.id, result=result)
+    await session.commit()
+
+    winner = await repo.create_pending_payment(
+        session,
+        user_id=user.id,
+        analysis_id=analysis.id,
+        amount=99,
+        currency="RUB",
+        provider="mock",
+        provider_payment_id="race-id",
+    )
+    await session.commit()
+
+    real_lookup = repo.get_payment_by_provider_id
+    calls = {"count": 0}
+
+    async def lying_lookup_once(session: AsyncSession, provider_payment_id: str):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return None  # simulate the race window: "winner" not visible yet
+        return await real_lookup(session, provider_payment_id)
+
+    monkeypatch.setattr(repo, "get_payment_by_provider_id", lying_lookup_once)
+
+    loser_result = await repo.create_pending_payment(
+        session,
+        user_id=user.id,
+        analysis_id=analysis.id,
+        amount=99,
+        currency="RUB",
+        provider="mock",
+        provider_payment_id="race-id",
+    )
+
+    assert loser_result.id == winner.id
+    # The session must still be usable afterward — the SAVEPOINT rollback
+    # must not have poisoned the outer transaction.
+    await repo.log_event(session, user.id, "start")
+    await session.commit()
+
+
 async def test_mark_payment_paid_is_idempotent(session: AsyncSession) -> None:
     user = await repo.get_or_create_user(session, telegram_id=6, username="q")
     await session.flush()

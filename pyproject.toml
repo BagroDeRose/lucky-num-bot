@@ -8,6 +8,10 @@ license = { text = "Proprietary" }
 dependencies = [
     "aiogram>=3.13,<4.0",
     "SQLAlchemy>=2.0,<3.0",
+    # asyncpg: production database (see README "PostgreSQL (production)").
+    "asyncpg>=0.29,<1.0",
+    # aiosqlite: local development and the test suite only — SQLite is not
+    # the production database (see app/database/session.py for why).
     "aiosqlite>=0.20,<1.0",
     "alembic>=1.13,<2.0",
     "pydantic>=2.7,<3.0",

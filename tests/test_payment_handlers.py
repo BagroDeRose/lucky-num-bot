@@ -199,7 +199,12 @@ async def test_yookassa_check_cannot_access_another_users_analysis(
     callback = _make_callback(f"yookassa_check:{analysis.id}")
     await cb_yookassa_check(callback, session, attacker)
 
-    callback.answer.assert_awaited_once_with("Анализ не найден.", show_alert=True)
+    # Callback is acknowledged immediately (bare, no alert) regardless of
+    # ownership outcome; the actual "not found" feedback goes out as a
+    # regular message via cb_answer (see cb_get_report's docstring for why).
+    callback.answer.assert_awaited_once_with()
+    sent_texts = [c.args[1] for c in callback.bot.send_message.await_args_list]
+    assert "Анализ не найден." in sent_texts
     await session.refresh(payment)
     assert payment.status == "pending"
 
@@ -264,3 +269,144 @@ async def test_get_report_shows_friendly_error_when_payment_creation_fails(
     # No payment row should have been left behind by the failed attempt.
     pending = await repo.get_latest_pending_payment(session, analysis.id, user.id)
     assert pending is None
+
+
+async def test_get_report_acknowledges_callback_before_slow_yookassa_call(
+    session: AsyncSession, monkeypatch
+) -> None:
+    """Regression test for a real production failure: Telegram invalidates
+    a callback query if answerCallbackQuery() isn't called within roughly
+    10-15s, but the YooKassa call is allowed up to 35s. If the handler
+    answers the callback *after* create_payment(), a slow (or merely
+    on-the-edge) YooKassa response causes
+    "query is too old and response timeout expired or query ID is invalid".
+    This proves the ordering: callback.answer() must complete before the
+    slow provider call is even started.
+    """
+    user = await repo.get_or_create_user(session, telegram_id=406, username="u")
+    await session.flush()
+    result = analyze("2200373")
+    analysis = await repo.create_analysis(session, user_id=user.id, result=result)
+    await session.commit()
+
+    provider = YooKassaPaymentProvider()
+    call_order: list[str] = []
+
+    async def slow_create(*, amount, currency, description):
+        call_order.append("create_payment_started")
+        from app.payments.provider import PaymentIntent
+
+        return PaymentIntent(
+            provider_payment_id="yk-406",
+            amount=amount,
+            currency=currency,
+            description=description,
+            extra={"confirmation_url": "https://yoomoney.ru/checkout/pay"},
+        )
+
+    monkeypatch.setattr(provider, "create_payment", slow_create)
+    monkeypatch.setattr(payment_module.payment_service, "provider", provider)
+    monkeypatch.setattr(payment_module.settings, "payment_provider", "yookassa")
+
+    callback = _make_callback(f"get_report:{analysis.id}")
+
+    async def recording_answer(*args, **kwargs):
+        call_order.append("callback_answered")
+
+    callback.answer = AsyncMock(side_effect=recording_answer)
+
+    await cb_get_report(callback, session, user)
+
+    assert call_order == ["callback_answered", "create_payment_started"]
+
+
+async def test_yookassa_check_acknowledges_callback_before_slow_status_check(
+    session: AsyncSession, monkeypatch
+) -> None:
+    """Same ordering guarantee for the "Проверить оплату" poll button."""
+    user, analysis, payment, intent, provider = await _make_yookassa_pending_payment(
+        session, 407, monkeypatch
+    )
+    call_order: list[str] = []
+
+    async def slow_check_status(provider_payment_id):
+        call_order.append("check_status_started")
+        return {
+            "id": intent.provider_payment_id,
+            "status": "pending",
+            "paid": False,
+            "amount": {"value": "99.00", "currency": "RUB"},
+        }
+
+    monkeypatch.setattr(provider, "check_status", slow_check_status)
+
+    callback = _make_callback(f"yookassa_check:{analysis.id}")
+
+    async def recording_answer(*args, **kwargs):
+        call_order.append("callback_answered")
+
+    callback.answer = AsyncMock(side_effect=recording_answer)
+
+    await cb_yookassa_check(callback, session, user)
+
+    assert call_order == ["callback_answered", "check_status_started"]
+
+
+async def test_get_report_handles_timeout_without_leaving_stale_payment(
+    session: AsyncSession, monkeypatch
+) -> None:
+    """The exact failure from the production log: create_payment() times
+    out after 35s. Must not mark anything paid, must not leave a phantom
+    payment row blocking a future retry, and must still promptly answer the
+    callback with a friendly (not "invalid credentials") message.
+    """
+    user = await repo.get_or_create_user(session, telegram_id=408, username="u")
+    await session.flush()
+    result = analyze("2200373")
+    analysis = await repo.create_analysis(session, user_id=user.id, result=result)
+    await session.commit()
+
+    provider = YooKassaPaymentProvider()
+
+    async def timing_out_create(*, amount, currency, description):
+        raise RuntimeError("YooKassa API request timed out")
+
+    monkeypatch.setattr(provider, "create_payment", timing_out_create)
+    monkeypatch.setattr(payment_module.payment_service, "provider", provider)
+    monkeypatch.setattr(payment_module.settings, "payment_provider", "yookassa")
+
+    callback = _make_callback(f"get_report:{analysis.id}")
+    await cb_get_report(callback, session, user)
+
+    callback.answer.assert_awaited_once_with()  # acknowledged despite the timeout
+
+    sent_texts = [c.args[1] for c in callback.bot.send_message.await_args_list]
+    assert any("технические неполадки" in t for t in sent_texts)
+    # Must never imply the credentials themselves are wrong — this was a
+    # timeout, not an authentication failure.
+    assert not any("credential" in t.lower() or "ключ" in t.lower() for t in sent_texts)
+
+    await session.refresh(analysis)
+    assert analysis.paid is False
+    assert await repo.get_latest_pending_payment(session, analysis.id, user.id) is None
+
+    # A subsequent retry must be able to proceed cleanly (no leftover state
+    # blocking it) — simulate the user tapping the button again.
+    async def succeeding_create(*, amount, currency, description):
+        from app.payments.provider import PaymentIntent
+
+        return PaymentIntent(
+            provider_payment_id="yk-408-retry",
+            amount=amount,
+            currency=currency,
+            description=description,
+            extra={"confirmation_url": "https://yoomoney.ru/checkout/pay"},
+        )
+
+    monkeypatch.setattr(provider, "create_payment", succeeding_create)
+    retry_callback = _make_callback(f"get_report:{analysis.id}")
+    await cb_get_report(retry_callback, session, user)
+
+    pending = await repo.get_latest_pending_payment(session, analysis.id, user.id)
+    assert pending is not None
+    assert pending.provider_payment_id == "yk-408-retry"

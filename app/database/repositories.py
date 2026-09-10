@@ -7,6 +7,7 @@ themselves, keeping persistence concerns out of business/UI logic.
 from __future__ import annotations
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.analysis.models import AnalysisResult
@@ -100,6 +101,13 @@ async def create_pending_payment(
 ) -> Payment:
     """Idempotent creation: if a payment with this provider_payment_id already
     exists, return it instead of creating a duplicate.
+
+    The check-then-insert above is not atomic by itself — two concurrent
+    callers could both see "no existing row" and both attempt to insert.
+    The database's UNIQUE constraint on provider_payment_id is the real
+    guarantee; the SAVEPOINT here just makes losing that race a graceful
+    "return the winner's row" instead of an unhandled IntegrityError, without
+    discarding whatever else the caller's session was mid-transaction on.
     """
     existing = await get_payment_by_provider_id(session, provider_payment_id)
     if existing is not None:
@@ -114,8 +122,15 @@ async def create_pending_payment(
         provider_payment_id=provider_payment_id,
         status=PaymentStatus.PENDING,
     )
-    session.add(payment)
-    await session.flush()
+    try:
+        async with session.begin_nested():
+            session.add(payment)
+            await session.flush()
+    except IntegrityError:
+        existing = await get_payment_by_provider_id(session, provider_payment_id)
+        if existing is not None:
+            return existing
+        raise
     return payment
 
 

@@ -93,7 +93,7 @@ scoring logic, SQL, or prompt text themselves.
   reports are cached so retries never re-trigger OpenAI calls.
 - Lightweight funnel-analytics event log + a CLI to summarize it.
 - `/history` with per-user, ownership-scoped access to past analyses.
-- Alembic migrations, async SQLAlchemy 2.x, pytest suite (90+ tests), ruff +
+- Alembic migrations, async SQLAlchemy 2.x, pytest suite (110+ tests), ruff +
   mypy clean.
 
 ## Requirements
@@ -121,16 +121,48 @@ cp .env.example .env
 ## Database setup / migrations
 
 The app auto-creates tables on startup via `init_db()` for convenience, but
-schema changes should go through Alembic:
+schema changes should go through Alembic. Both commands below read
+`DATABASE_URL` from `.env` — works against SQLite (local dev) or PostgreSQL
+(production) with no code changes:
 
 ```bash
-# apply all migrations (creates lucky_num.db locally by default)
+# apply all migrations
 alembic upgrade head
 
 # after changing app/database/models.py, generate a new migration
 alembic revision --autogenerate -m "describe the change"
 alembic upgrade head
 ```
+
+### PostgreSQL (production)
+
+SQLite is the local-dev/test default, but it only allows **one writer at a
+time** — under real concurrent Telegram traffic (multiple updates being
+handled at once, each opening its own DB session) this surfaces as
+`sqlite3.OperationalError: database is locked`. PostgreSQL is the intended
+production database.
+
+The application code is already database-agnostic — `app/database/models.py`
+and `app/database/repositories.py` use only portable SQLAlchemy types, and
+`app/database/session.py`'s only SQLite-specific behavior (foreign-key
+enforcement, WAL mode) is dialect-guarded and simply does nothing on
+PostgreSQL. **Switching is a `DATABASE_URL` change, not a code change.**
+
+1. Provision a PostgreSQL database (a managed instance, or `apt install
+   postgresql` / Docker `postgres` image on your VPS) and create a database
+   + user for the bot.
+2. Set `DATABASE_URL` in `.env`:
+   ```
+   DATABASE_URL=postgresql+asyncpg://lucky_num:<password>@<host>:5432/lucky_num
+   ```
+   (the `asyncpg` driver is already a project dependency — nothing extra to
+   install).
+3. Run migrations against it: `alembic upgrade head`.
+4. Start the bot as usual: `python -m app.main`.
+
+SQLite remains fully supported for local development and is what the test
+suite always uses (an isolated in-memory database per test, unrelated to
+whatever `DATABASE_URL` is set to locally).
 
 ## Running locally
 
@@ -147,7 +179,7 @@ closes the bot session).
 pytest
 ```
 
-90+ tests cover: input validation, deterministic scoring/pattern detection
+110+ tests cover: input validation, deterministic scoring/pattern detection
 and score bounds (including a regression test against digit-frequency
 double-counting), algorithm determinism, repository operations (including
 user-scoped access control and SQLite foreign-key enforcement), payment
@@ -156,7 +188,11 @@ providers, `pre_checkout_query` validation, YooKassa provider behavior
 (all HTTP calls mocked), AI report generation (OpenAI is **fully mocked** —
 no real API calls in the test suite, with timeout/malformed/empty-response
 and retry paths also tested), Telegram routing edge cases (e.g. a slash
-command while the FSM is mid-flow), and a full free-to-paid integration
+command while the FSM is mid-flow, or editing a message to identical
+content), callback-query handlers acknowledging promptly *before* any slow
+external call so Telegram never invalidates them, concurrent-write behavior
+against a real file-based SQLite database (WAL mode, busy_timeout, and a
+deterministic unique-constraint race), and a full free-to-paid integration
 flow.
 
 ## Linting / type checking
@@ -279,7 +315,8 @@ sufficient:
 # one-time setup
 python -m venv .venv
 .venv/bin/pip install -e .
-cp .env.example .env   # fill in real values
+cp .env.example .env   # fill in real values, including DATABASE_URL for
+                        # PostgreSQL — see "PostgreSQL (production)" above
 .venv/bin/alembic upgrade head
 
 # start
@@ -335,10 +372,10 @@ rewrites:
   the full flow before real payment credentials are available.
 - No admin web dashboard; use `scripts/funnel_stats.py` for basic funnel
   numbers.
-- SQLite is used for MVP simplicity; for meaningfully concurrent production
-  load, migrate `DATABASE_URL` to Postgres (SQLAlchemy/Alembic already
-  support this — no application code changes needed beyond the URL and
-  driver).
+- SQLite is for local development/tests only; production deployments must
+  set `DATABASE_URL` to PostgreSQL (see "PostgreSQL (production)" above) —
+  SQLite allows only one writer at a time and will raise "database is
+  locked" under real concurrent Telegram traffic.
 - `payments.status` supports `refunded` in the schema, but no code path sets
   it yet — there is no refund UI/webhook in this MVP. If a payment is
   refunded through YooKassa's own dashboard, `analysis.paid`/`analysis.
