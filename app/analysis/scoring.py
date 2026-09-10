@@ -10,10 +10,12 @@ from __future__ import annotations
 from app.analysis.models import DetectedPattern, ScoreBreakdown, ScoreFactor
 from app.analysis.rules import (
     BASE_DIGIT_PROFILE,
+    DIGIT_EMPHASIS_CAP,
     DIGIT_MEANINGS,
     OVERALL_MAX,
     OVERALL_MIN,
     REPEATED_DIGIT_THRESHOLD,
+    SCORE_CATEGORIES,
     SCORE_MAX,
     SCORE_MIN,
 )
@@ -41,18 +43,6 @@ def find_repeated_pairs(digits: list[int]) -> list[str]:
                 seen.add(pair)
                 pairs.append(pair)
     return pairs
-
-
-def _is_ascending_run(digits: list[int]) -> bool:
-    return len(digits) >= 3 and all(
-        digits[i + 1] == digits[i] + 1 for i in range(len(digits) - 1)
-    )
-
-
-def _is_descending_run(digits: list[int]) -> bool:
-    return len(digits) >= 3 and all(
-        digits[i + 1] == digits[i] - 1 for i in range(len(digits) - 1)
-    )
 
 
 def _longest_run(digits: list[int], ascending: bool) -> int:
@@ -128,181 +118,146 @@ def _clamp(value: int, lo: int, hi: int) -> int:
     return max(lo, min(hi, value))
 
 
+def _dominant_categories(digit: int) -> list[str]:
+    """Category/categories where `digit` scores highest in BASE_DIGIT_PROFILE.
+
+    Returns all four category names if the digit has no unique preference
+    (currently only digit 0 — "потенциал... не выбрало свой путь").
+    """
+    profile = BASE_DIGIT_PROFILE[digit]
+    top = max(profile)
+    return [cat for cat, value in zip(SCORE_CATEGORIES, profile, strict=True) if value == top]
+
+
 def compute_scores(
     reduced_number: int,
-    digits: list[int],
     freq: dict[int, int],
-    repeated_digits: list[int],
     repeated_pairs: list[str],
     patterns: list[DetectedPattern],
 ) -> tuple[int, int, int, int, int, ScoreBreakdown]:
-    """Returns (money, luck, growth, stability, overall, breakdown)."""
+    """Returns (money, luck, growth, stability, overall, breakdown).
 
-    base_money, base_luck, base_growth, base_stability = BASE_DIGIT_PROFILE[reduced_number]
+    See the module docstring in app.analysis.rules for the full formula.
+    """
+
+    scores = dict(zip(SCORE_CATEGORIES, BASE_DIGIT_PROFILE[reduced_number], strict=True))
     breakdown = ScoreBreakdown()
+    breakdown_lists = {
+        "money": breakdown.money,
+        "luck": breakdown.luck,
+        "growth": breakdown.growth,
+        "stability": breakdown.stability,
+    }
 
-    money, luck, growth, stability = base_money, base_luck, base_growth, base_stability
+    def add(category: str, amount: int, factor: str, reason: str) -> None:
+        if amount == 0:
+            return
+        scores[category] += amount
+        breakdown_lists[category].append(
+            ScoreFactor(factor=factor, effect=f"+{amount}", reason=reason)
+        )
 
-    breakdown.money.append(
-        ScoreFactor(
-            factor="reduced_number",
-            effect=f"+{base_money}",
-            reason=(
-                f"Итоговое число {reduced_number} символизирует "
-                f"{DIGIT_MEANINGS[reduced_number]}."
-            ),
-        )
-    )
-    breakdown.luck.append(
-        ScoreFactor(
-            factor="reduced_number",
-            effect=f"+{base_luck}",
-            reason=(
-                f"Итоговое число {reduced_number} символизирует "
-                f"{DIGIT_MEANINGS[reduced_number]}."
-            ),
-        )
-    )
-    breakdown.growth.append(
-        ScoreFactor(
-            factor="reduced_number",
-            effect=f"+{base_growth}",
-            reason=(
-                f"Итоговое число {reduced_number} символизирует "
-                f"{DIGIT_MEANINGS[reduced_number]}."
-            ),
-        )
-    )
-    breakdown.stability.append(
-        ScoreFactor(
-            factor="reduced_number",
-            effect=f"+{base_stability}",
-            reason=(
-                f"Итоговое число {reduced_number} символизирует "
-                f"{DIGIT_MEANINGS[reduced_number]}."
-            ),
-        )
-    )
-
-    # Repeated digits: a small, capped bonus to money and luck.
-    if repeated_digits:
-        bonus = min(2, len(repeated_digits))
-        money += bonus
-        luck += bonus
-        breakdown.money.append(
+    # `scores` already holds the base profile values (set above); just log
+    # the explanatory breakdown entries without mutating them again.
+    for category, base_value in zip(SCORE_CATEGORIES, BASE_DIGIT_PROFILE[reduced_number], strict=True):
+        breakdown_lists[category].append(
             ScoreFactor(
-                factor="repeated_digits",
-                effect=f"+{bonus}",
-                reason="Повторяющиеся цифры усиливают символическую значимость номера.",
-            )
-        )
-        breakdown.luck.append(
-            ScoreFactor(
-                factor="repeated_digits",
-                effect=f"+{bonus}",
-                reason="Повторяющиеся цифры усиливают символическую значимость номера.",
+                factor="reduced_number",
+                effect=f"+{base_value}",
+                reason=(
+                    f"Итоговое число {reduced_number} символизирует "
+                    f"{DIGIT_MEANINGS[reduced_number]}."
+                ),
             )
         )
 
-    # Repeated adjacent pairs: bonus to stability and luck.
+    # Digit-emphasis bonus: the ONLY mechanism keyed by raw digit frequency,
+    # so no digit's repetition is ever counted twice. Each digit with 2+
+    # occurrences adds a capped bonus to *its own* dominant category/ies.
+    for digit in sorted(freq):
+        extra = freq[digit] - 1
+        if extra <= 0:
+            continue
+        bonus = min(DIGIT_EMPHASIS_CAP, extra)
+        categories = _dominant_categories(digit)
+        if len(categories) == len(SCORE_CATEGORIES):
+            continue  # no directional preference (digit 0) -> no emphasis bonus
+        for category in categories:
+            add(
+                category,
+                bonus,
+                f"digit_emphasis_{digit}",
+                f"Цифра {digit} встречается {freq[digit]} раз(а), усиливая "
+                f"{DIGIT_MEANINGS[digit]}.",
+            )
+
+    # Repeated adjacent pairs: a distinct *structural* (positional) signal,
+    # independent of raw frequency above.
     if repeated_pairs:
         bonus = min(2, len(repeated_pairs))
-        stability += bonus
-        luck += 1
-        breakdown.stability.append(
-            ScoreFactor(
-                factor="repeated_pairs",
-                effect=f"+{bonus}",
-                reason="Соседние одинаковые цифры создают ощущение устойчивости номера.",
-            )
+        add(
+            "stability",
+            bonus,
+            "repeated_pairs",
+            "Соседние одинаковые цифры создают ощущение устойчивости номера.",
         )
-        breakdown.luck.append(
-            ScoreFactor(
-                factor="repeated_pairs",
-                effect="+1",
-                reason="Парные цифры добавляют номеру дополнительную «изюминку».",
-            )
+        add(
+            "luck",
+            1,
+            "repeated_pairs",
+            "Парные цифры добавляют номеру дополнительную «изюминку».",
         )
 
     pattern_names = {p.name for p in patterns}
 
     if "palindrome" in pattern_names:
-        luck += 2
-        stability += 1
-        breakdown.luck.append(
-            ScoreFactor(
-                factor="palindrome",
-                effect="+2",
-                reason="Номер-палиндром — редкое и заметное свойство в нашей системе.",
-            )
+        add(
+            "luck",
+            2,
+            "palindrome",
+            "Номер-палиндром — редкое и заметное свойство в нашей системе.",
         )
-        breakdown.stability.append(
-            ScoreFactor(
-                factor="palindrome",
-                effect="+1",
-                reason="Симметрия номера ассоциируется с внутренним равновесием.",
-            )
+        add(
+            "stability",
+            1,
+            "palindrome",
+            "Симметрия номера ассоциируется с внутренним равновесием.",
         )
 
     if "ascending_sequence" in pattern_names:
-        growth += 2
-        breakdown.growth.append(
-            ScoreFactor(
-                factor="ascending_sequence",
-                effect="+2",
-                reason="Возрастающая последовательность символизирует движение вперёд.",
-            )
+        add(
+            "growth",
+            2,
+            "ascending_sequence",
+            "Возрастающая последовательность символизирует движение вперёд.",
         )
 
     if "descending_sequence" in pattern_names:
-        growth += 1
-        stability += 1
-        breakdown.growth.append(
-            ScoreFactor(
-                factor="descending_sequence",
-                effect="+1",
-                reason="Убывающая последовательность символизирует завершение цикла.",
-            )
+        add(
+            "growth",
+            1,
+            "descending_sequence",
+            "Убывающая последовательность символизирует завершение цикла.",
         )
-        breakdown.stability.append(
-            ScoreFactor(
-                factor="descending_sequence",
-                effect="+1",
-                reason="Плавный спад ассоциируется с контролем и порядком.",
-            )
+        add(
+            "stability",
+            1,
+            "descending_sequence",
+            "Плавный спад ассоциируется с контролем и порядком.",
         )
 
-    # Extra copies of digit 8 beyond the first reinforce the "money" theme.
-    extra_eights = max(0, freq.get(8, 0) - 1)
-    if extra_eights:
-        bonus = min(2, extra_eights)
-        money += bonus
-        breakdown.money.append(
-            ScoreFactor(
-                factor="digit_8_frequency",
-                effect=f"+{bonus}",
-                reason="Дополнительные восьмёрки усиливают денежную символику номера.",
-            )
-        )
+    for category in SCORE_CATEGORIES:
+        scores[category] = _clamp(scores[category], SCORE_MIN, SCORE_MAX)
 
-    # Extra copies of digit 7 beyond the first reinforce the "luck" theme.
-    extra_sevens = max(0, freq.get(7, 0) - 1)
-    if extra_sevens:
-        bonus = min(2, extra_sevens)
-        luck += bonus
-        breakdown.luck.append(
-            ScoreFactor(
-                factor="digit_7_frequency",
-                effect=f"+{bonus}",
-                reason="Дополнительные семёрки усиливают символику удачи.",
-            )
-        )
+    overall = _clamp(
+        round(sum(scores.values()) * 2.5), OVERALL_MIN, OVERALL_MAX
+    )
 
-    money = _clamp(money, SCORE_MIN, SCORE_MAX)
-    luck = _clamp(luck, SCORE_MIN, SCORE_MAX)
-    growth = _clamp(growth, SCORE_MIN, SCORE_MAX)
-    stability = _clamp(stability, SCORE_MIN, SCORE_MAX)
-
-    overall = _clamp(round((money + luck + growth + stability) * 2.5), OVERALL_MIN, OVERALL_MAX)
-
-    return money, luck, growth, stability, overall, breakdown
+    return (
+        scores["money"],
+        scores["luck"],
+        scores["growth"],
+        scores["stability"],
+        overall,
+        breakdown,
+    )

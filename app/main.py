@@ -8,6 +8,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
+from app.bot.error_handler import register_error_handler
 from app.bot.handlers import build_root_router
 from app.bot.middlewares.db import DbSessionMiddleware
 from app.config import settings
@@ -36,6 +37,7 @@ async def run() -> None:
     dispatcher = Dispatcher()
     dispatcher.update.middleware(DbSessionMiddleware())
     dispatcher.include_router(build_root_router())
+    register_error_handler(dispatcher)
 
     try:
         await bot.delete_webhook(drop_pending_updates=True)

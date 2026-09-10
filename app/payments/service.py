@@ -26,11 +26,29 @@ class PaymentService:
     ) -> tuple[Payment, PaymentIntent]:
         """Create a pending payment for an analysis and return the intent the
         handler should present to the user (mock button or Telegram invoice).
+
+        Reuses an already-pending payment for the same analysis instead of
+        minting a new provider_payment_id every time — otherwise repeatedly
+        tapping "get full report" before paying would pile up an unbounded
+        number of orphaned pending Payment rows, one per tap.
         """
+        description = f"LuckyNum: полный отчёт по номеру {analysis.number}"
+
+        existing = await repo.get_latest_pending_payment(session, analysis.id, user_id)
+        if existing is not None:
+            intent = PaymentIntent(
+                provider_payment_id=existing.provider_payment_id,
+                amount=existing.amount,
+                currency=existing.currency,
+                description=description,
+                extra={"payload": existing.provider_payment_id},
+            )
+            return existing, intent
+
         intent = await self.provider.create_payment(
             amount=settings.price_rub,
             currency=settings.currency,
-            description=f"LuckyNum: полный отчёт по номеру {analysis.number}",
+            description=description,
         )
         payment = await repo.create_pending_payment(
             session,
@@ -65,6 +83,22 @@ class PaymentService:
         payment = await repo.get_payment_by_provider_id(session, result.provider_payment_id)
         if payment is None:
             logger.warning("Unknown payment callback: %s", result.provider_payment_id)
+            return None
+
+        # Cross-check the callback's amount/currency against what we stored
+        # server-side when the payment was created. The provider-reported
+        # values are never used to *set* anything — only to confirm they
+        # match our own trusted record — so a callback claiming a different
+        # amount than what was actually offered cannot sneak past.
+        if result.amount != payment.amount or result.currency != payment.currency:
+            logger.warning(
+                "Payment amount/currency mismatch for %s: callback=%s %s, expected=%s %s",
+                result.provider_payment_id,
+                result.amount,
+                result.currency,
+                payment.amount,
+                payment.currency,
+            )
             return None
 
         transitioned = await repo.mark_payment_paid(session, payment)

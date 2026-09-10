@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import pytest
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.analysis.engine import analyze
 from app.database import repositories as repo
-from app.database.models import PaymentStatus
+from app.database.models import Analysis, PaymentStatus
 
 
 async def test_get_or_create_user_is_idempotent(session: AsyncSession) -> None:
@@ -12,6 +14,29 @@ async def test_get_or_create_user_is_idempotent(session: AsyncSession) -> None:
     u2 = await repo.get_or_create_user(session, telegram_id=42, username="alice")
     await session.commit()
     assert u1.id == u2.id
+
+
+async def test_foreign_key_enforcement_rejects_orphaned_row(session: AsyncSession) -> None:
+    """SQLite ignores FK constraints unless enforcement is turned on per
+    connection. Regression test for that being silently off: without the
+    PRAGMA, this insert would succeed and leave an orphaned row.
+    """
+    bogus = Analysis(
+        user_id=999999,  # no such user
+        number="1234567",
+        digit_sum=1,
+        final_number=1,
+        money_score=1,
+        luck_score=1,
+        growth_score=1,
+        stability_score=1,
+        overall_score=1,
+        algorithm_version="1.0",
+        analysis_payload={},
+    )
+    session.add(bogus)
+    with pytest.raises(IntegrityError):
+        await session.flush()
 
 
 async def test_create_and_fetch_analysis_scoped_to_user(session: AsyncSession) -> None:

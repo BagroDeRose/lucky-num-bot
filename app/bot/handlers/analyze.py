@@ -41,7 +41,7 @@ async def cb_analyze_new(
     await callback.answer()
 
 
-@router.message(AnalysisStates.waiting_for_number, F.text)
+@router.message(AnalysisStates.waiting_for_number, F.text, ~F.text.startswith("/"))
 async def handle_number_input(
     message: Message, state: FSMContext, session: AsyncSession, user: User
 ) -> None:

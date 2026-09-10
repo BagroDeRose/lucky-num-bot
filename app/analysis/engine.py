@@ -91,9 +91,7 @@ def analyze(raw_number: str) -> AnalysisResult:
 
     money, luck, growth, stability, overall, breakdown = compute_scores(
         reduced_number=reduced_number,
-        digits=digits,
         freq=freq,
-        repeated_digits=repeated_digits,
         repeated_pairs=repeated_pairs,
         patterns=patterns,
     )

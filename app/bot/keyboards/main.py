@@ -46,6 +46,27 @@ def mock_payment_kb(analysis_id: int, amount: int, currency: str) -> InlineKeybo
     )
 
 
+def yookassa_payment_kb(
+    analysis_id: int, amount: int, currency: str, confirmation_url: str
+) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"💳 Оплатить {amount} {currency} через YooKassa",
+                    url=confirmation_url,
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="✅ Я оплатил, проверить статус",
+                    callback_data=f"yookassa_check:{analysis_id}",
+                )
+            ],
+        ]
+    )
+
+
 def after_report_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[

@@ -46,8 +46,6 @@ ASK_NUMBER = (
     "Например: <code>2200373</code>"
 )
 
-ANALYZING = "🔮 Анализирую номер..."
-
 PAYMENT_INTRO = (
     "💳 Полный отчёт стоит {amount} {currency}.\n\n"
     "В него войдут: подробная символика главного числа, разбор всех "
@@ -64,6 +62,20 @@ PAYMENT_MOCK_NOTE = (
 )
 
 PAYMENT_SUCCESS = "✅ Оплата прошла успешно! Готовлю ваш полный отчёт..."
+
+YOOKASSA_PAYMENT_NOTE = (
+    "\n\nПосле оплаты вернитесь в этот чат и нажмите «Я оплатил, проверить статус»."
+)
+
+YOOKASSA_PAYMENT_NOT_CONFIRMED = (
+    "⏳ Оплата пока не подтверждена платёжной системой. Если вы уже оплатили, "
+    "подождите немного и нажмите кнопку ещё раз."
+)
+
+YOOKASSA_PAYMENT_ERROR = (
+    "😔 Не удалось проверить статус оплаты (технические неполадки на стороне "
+    "платёжной системы). Попробуйте ещё раз через минуту."
+)
 
 REPORT_GENERATION_FAILED = (
     "😔 Не удалось сгенерировать персональный AI-отчёт прямо сейчас "
@@ -87,4 +99,6 @@ def payment_intro_text() -> str:
     text = PAYMENT_INTRO.format(amount=settings.price_rub, currency=settings.currency)
     if settings.payment_provider == "mock":
         text += PAYMENT_MOCK_NOTE
+    elif settings.payment_provider == "yookassa":
+        text += YOOKASSA_PAYMENT_NOTE
     return text

@@ -27,8 +27,8 @@ AI на основе уже посчитанных данных. Это разв
    and four bounded sub-scores (money / luck / growth / stability) plus an
    overall 0–100 score, with a full explainable breakdown.
 4. The bot shows a **free teaser** — interesting, but deliberately partial.
-5. User taps "Получить полный отчёт" and pays (mock provider locally, or
-   real Telegram Payments once configured).
+5. User taps "Получить полный отчёт" and pays (mock provider locally, real
+   Telegram Payments, or YooKassa, depending on configuration).
 6. On confirmed payment, the structured analysis is handed to OpenAI, which
    narrates it into a polished report — **the AI never computes anything**,
    it only writes prose around numbers that already exist.
@@ -85,15 +85,15 @@ scoring logic, SQL, or prompt text themselves.
 - Free teaser vs. paid full report, designed for conversion ("is it
   interesting?" free vs. "why is it interesting?" paid).
 - Provider-agnostic payment abstraction with a working mock provider (no
-  credentials needed) and a ready-to-enable native Telegram Payments
-  provider.
+  credentials needed), a ready-to-enable native Telegram Payments provider,
+  and a real YooKassa REST API integration.
 - Idempotent payment state machine (`pending` → `paid`/`failed`/`refunded`);
   duplicate callbacks/Telegram retries never double-charge or double-unlock.
 - AI report generation strictly narrates pre-computed structured data;
   reports are cached so retries never re-trigger OpenAI calls.
 - Lightweight funnel-analytics event log + a CLI to summarize it.
 - `/history` with per-user, ownership-scoped access to past analyses.
-- Alembic migrations, async SQLAlchemy 2.x, pytest suite (49 tests), ruff +
+- Alembic migrations, async SQLAlchemy 2.x, pytest suite (90+ tests), ruff +
   mypy clean.
 
 ## Requirements
@@ -101,7 +101,8 @@ scoring logic, SQL, or prompt text themselves.
 - Python 3.12+
 - A Telegram bot token from [@BotFather](https://t.me/BotFather)
 - (Optional, required for AI reports) an OpenAI API key
-- (Optional, for real payments) a Telegram Payments provider token
+- (Optional, for real payments) either a Telegram Payments provider token,
+  or a YooKassa shop ID + secret key
 
 ## Setup
 
@@ -146,12 +147,17 @@ closes the bot session).
 pytest
 ```
 
-49 tests cover: input validation, deterministic scoring/pattern detection
-and score bounds, algorithm determinism, repository operations (including
-user-scoped access control), payment idempotency, AI report generation
-(OpenAI is **fully mocked** — no real API calls in the test suite, with a
-graceful-degradation fallback path also tested), and a full free-to-paid
-integration flow.
+90+ tests cover: input validation, deterministic scoring/pattern detection
+and score bounds (including a regression test against digit-frequency
+double-counting), algorithm determinism, repository operations (including
+user-scoped access control and SQLite foreign-key enforcement), payment
+idempotency and amount/currency tamper protection across all three
+providers, `pre_checkout_query` validation, YooKassa provider behavior
+(all HTTP calls mocked), AI report generation (OpenAI is **fully mocked** —
+no real API calls in the test suite, with timeout/malformed/empty-response
+and retry paths also tested), Telegram routing edge cases (e.g. a slash
+command while the FSM is mid-flow), and a full free-to-paid integration
+flow.
 
 ## Linting / type checking
 
@@ -180,20 +186,24 @@ See [`.env.example`](.env.example) for the full list. Summary:
 | Variable | Required | Notes |
 |---|---|---|
 | `BOT_TOKEN` | **Yes** | From @BotFather. Bot will not start without it. |
-| `OPENAI_API_KEY` | For paid reports | Without it, paid reports fail gracefully with a retry option; teaser and mock payment flow still work. |
-| `OPENAI_MODEL` | No | Defaults to `gpt-4o-mini`. |
-| `PAYMENT_PROVIDER` | No | `mock` (default, local testing) or `telegram`. |
-| `PAYMENT_TOKEN` | If `PAYMENT_PROVIDER=telegram` | Provider token from BotFather → Payments. |
+| `OPENAI_API_KEY` | For paid reports | Without it, paid reports fail gracefully with a retry option; teaser and payment flow still work. |
+| `OPENAI_MODEL` | No | Defaults to `gpt-3.5-turbo`. |
+| `PAYMENT_PROVIDER` | No | `mock` (default, local testing), `telegram`, or `yookassa`. |
+| `PAYMENT_TOKEN` | If `PAYMENT_PROVIDER=telegram` | Native Telegram Payments provider token from BotFather → Payments. Unrelated to YooKassa. |
+| `YOOKASSA_SHOP_ID` | If `PAYMENT_PROVIDER=yookassa` | YooKassa shop (merchant) ID — the *shop* credential pair that actually charges the user. |
+| `YOOKASSA_SHOP_API_KEY` | If `PAYMENT_PROVIDER=yookassa` | YooKassa shop secret key. |
+| `YOOKASSA_AGENT_ID` | No | YooKassa *agent* (payouts — sending money out) ID. Accepted for forward-compatibility only; this MVP has no payout feature and never uses it. |
+| `YOOKASSA_AGENT_API_KEY` | No | Same caveat as above. |
 | `DATABASE_URL` | No | Defaults to a local SQLite file. |
-| `PRICE_RUB` | No | Integer price of the full report. Defaults to 99. |
+| `PRICE_RUB` | No | Integer price of the full report. Defaults to 99. The server is always the source of truth for this — never trusted from client/callback input. |
 | `CURRENCY` | No | Defaults to `RUB`. |
 | `LOG_LEVEL` | No | Defaults to `INFO`. |
 
 ## Payment integration point
 
 `app/payments/provider.py` defines the `PaymentProvider` interface
-(`create_payment` / `verify_payment` / `parse_callback`). Two implementations
-ship today:
+(`create_payment` / `verify_payment` / `parse_callback`). Three
+implementations ship today:
 
 - **`MockPaymentProvider`** (default): "payment" completes instantly when the
   user taps a button. Zero external dependencies — use this for local
@@ -203,11 +213,31 @@ ship today:
   Telegram itself connects to a real payment provider configured via
   BotFather. **To go live: set `PAYMENT_PROVIDER=telegram` and `PAYMENT_TOKEN`
   — no code changes required.**
+- **`YooKassaPaymentProvider`**: a real integration against the YooKassa
+  REST API (`api.yookassa.ru/v3`), using the *shop* credentials
+  (`YOOKASSA_SHOP_ID` / `YOOKASSA_SHOP_API_KEY`) — the merchant-facing API
+  that actually charges the user. YooKassa's separate *agent* credentials
+  (a payouts API, for sending money out) are accepted as configuration but
+  deliberately **not** used anywhere in the charging flow, since this MVP
+  has no payout/agent feature.
+  - Flow: `create_payment()` creates a YooKassa payment with `confirmation.
+    type=redirect` and returns a `confirmation_url`; the bot sends that as a
+    URL button plus a "✅ Я оплатил, проверить статус" button. This MVP has
+    no public HTTPS endpoint for YooKassa's webhook, so confirmation is via
+    **polling**: tapping that button calls `GET /payments/{id}` and the
+    authoritative status/amount from that response — never anything the
+    client or Telegram claims — is what unlocks the report.
+    `YooKassaPaymentProvider.parse_callback()` consumes that same Payment
+    JSON shape, so a webhook receiver can be added later purely as an
+    additional trigger for the existing confirmation path, with no parsing
+    changes.
+  - **To go live**: set `PAYMENT_PROVIDER=yookassa`, `YOOKASSA_SHOP_ID`, and
+    `YOOKASSA_SHOP_API_KEY` to your live (non-`test_`) shop credentials — no
+    code changes required.
 
-A bespoke Russian acquiring provider (direct HTTP integration) can be added
-later by implementing the same `PaymentProvider` interface; the rest of the
-app (handlers, `PaymentService`, DB schema) is provider-agnostic and would
-not need to change.
+A bespoke acquiring provider can be added later by implementing the same
+`PaymentProvider` interface; the rest of the app (handlers, `PaymentService`,
+DB schema) is provider-agnostic and would not need to change.
 
 ## OpenAI configuration
 
@@ -292,8 +322,8 @@ rewrites:
   yet).
 - Additional "number domains" (phone numbers, car plates, apartment/dates)
   could reuse `rules.py` + `scoring.py` patterns with their own rule tables.
-- A real Russian payment gateway can be dropped in behind `PaymentProvider`
-  without touching handlers.
+- YooKassa is already wired in behind `PaymentProvider`; a different gateway
+  can be added the same way without touching handlers.
 - Algorithm versioning (`ALGORITHM_VERSION`) is stored per-analysis so a
   future v2.0 scoring model won't corrupt/reinterpret historical results.
 
@@ -309,3 +339,13 @@ rewrites:
   load, migrate `DATABASE_URL` to Postgres (SQLAlchemy/Alembic already
   support this — no application code changes needed beyond the URL and
   driver).
+- `payments.status` supports `refunded` in the schema, but no code path sets
+  it yet — there is no refund UI/webhook in this MVP. If a payment is
+  refunded through YooKassa's own dashboard, `analysis.paid`/`analysis.
+  report` are **not** automatically revoked; building that revocation flow
+  is a reasonable next step once a real refund need arises.
+- YooKassa confirmation is polling-based (see "Payment integration point"),
+  not webhook-based, since this MVP has no public HTTPS endpoint. This works
+  fine for a low-volume bot but adds a manual "check status" tap; a webhook
+  receiver (a small aiohttp web app run alongside the bot) is the natural
+  production upgrade and would need no changes to `parse_callback`.
