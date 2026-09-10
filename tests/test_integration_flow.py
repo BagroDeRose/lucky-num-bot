@@ -34,7 +34,7 @@ async def test_full_free_to_paid_flow(session: AsyncSession, monkeypatch) -> Non
     # 3. Free teaser is shown and must not leak the full report.
     teaser = render_teaser(result)
     assert str(result.overall_score) in teaser
-    assert "полную персональную интерпретацию" in teaser
+    assert "полный разбор" in teaser
 
     # 4. User clicks "get full report" -> payment intent created.
     service = PaymentService()

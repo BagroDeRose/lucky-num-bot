@@ -52,7 +52,14 @@ async def test_generate_report_with_fallback_never_raises(sample_result, monkeyp
 
     text = await report_generator.generate_report_with_fallback(sample_result)
     assert "2200373" in text
-    assert "развлекательная" in text.lower()
+    # Product direction: no "entertainment only" / "not financial advice"
+    # disclaimer footer in the report text.
+    assert "развлекательная" not in text.lower()
+    assert "не является финансовым" not in text.lower()
+    # But it must still read as a full, structured report, not a bare stub.
+    assert "Денежный потенциал" in text
+    assert "Общий показатель" in text
+    assert f"{sample_result.overall_score}/100" in text
 
 
 async def test_generate_report_wraps_timeout(sample_result, monkeypatch) -> None:

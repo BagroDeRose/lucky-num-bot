@@ -93,7 +93,7 @@ scoring logic, SQL, or prompt text themselves.
   reports are cached so retries never re-trigger OpenAI calls.
 - Lightweight funnel-analytics event log + a CLI to summarize it.
 - `/history` with per-user, ownership-scoped access to past analyses.
-- Alembic migrations, async SQLAlchemy 2.x, pytest suite (110+ tests), ruff +
+- Alembic migrations, async SQLAlchemy 2.x, pytest suite (160+ tests), ruff +
   mypy clean.
 
 ## Requirements
@@ -179,7 +179,7 @@ closes the bot session).
 pytest
 ```
 
-110+ tests cover: input validation, deterministic scoring/pattern detection
+160+ tests cover: input validation, deterministic scoring/pattern detection
 and score bounds (including a regression test against digit-frequency
 double-counting), algorithm determinism, repository operations (including
 user-scoped access control and SQLite foreign-key enforcement), payment
@@ -192,8 +192,10 @@ command while the FSM is mid-flow, or editing a message to identical
 content), callback-query handlers acknowledging promptly *before* any slow
 external call so Telegram never invalidates them, concurrent-write behavior
 against a real file-based SQLite database (WAL mode, busy_timeout, and a
-deterministic unique-constraint race), and a full free-to-paid integration
-flow.
+deterministic unique-constraint race), Telegram HTML sanitization (Markdown
+leakage, tag balancing, message-length truncation), and the AI-facing report
+payload (deterministic facts preserved and internal scoring mechanics never
+exposed), and a full free-to-paid integration flow.
 
 ## Linting / type checking
 
@@ -278,17 +280,30 @@ DB schema) is provider-agnostic and would not need to change.
 ## OpenAI configuration
 
 - `OPENAI_API_KEY` and `OPENAI_MODEL` in `.env`.
-- Prompts live in `app/ai/prompts.py`. The system prompt hard-codes the
-  entertainment/no-financial-advice constraints and instructs the model to
-  use *only* the structured facts it's given — never invent scores or
-  patterns.
+- Prompts live in `app/ai/prompts.py`. The system prompt defines a fixed,
+  premium report structure (hook → main number walkthrough → digit-by-digit
+  story → detected patterns → four profile sections → verdict), requires
+  Telegram HTML (`<b>`/`<i>`) rather than Markdown, and forbids exposing raw
+  scoring mechanics or guaranteeing outcomes — while explicitly *not* adding
+  an "entertainment only" disclaimer footer (a deliberate product choice).
+- `app.ai.report_generator._build_ai_payload()` curates what the model ever
+  sees: deterministic facts (digits, sums, patterns, scores) only — never
+  the internal `score_breakdown` (the "+6", "+1" style contributions), so
+  the model structurally cannot echo scoring internals back to the user.
+- The model's raw output is passed through `app.formatting.to_telegram_html`
+  (converts any Markdown the model reaches for anyway into HTML, escapes
+  everything else, degrades to plain text if tags end up unbalanced) and
+  `truncate_telegram_html` (enforces Telegram's 4096-character message
+  limit) before being stored/sent — see that module for why this lives
+  outside `app.bot` despite being Telegram-specific.
 - If the API call fails or the key is missing, `generate_report` raises
   `ReportGenerationError`; the payment handler catches this, keeps the paid
   state intact, and offers a "🔄 Повторить генерацию отчёта" retry button —
   a paying user is never left without recourse.
 - `generate_report_with_fallback` (used where a guaranteed non-empty result
   is preferred over a retry prompt) falls back to a plain deterministic
-  report template (`interpreter.render_fallback_full_report`).
+  report template (`interpreter.render_fallback_full_report`) that mirrors
+  the same section structure without the AI's richer prose.
 
 ## Security notes
 

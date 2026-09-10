@@ -16,6 +16,39 @@ async def test_get_or_create_user_is_idempotent(session: AsyncSession) -> None:
     assert u1.id == u2.id
 
 
+async def test_get_or_create_user_recovers_from_lost_race(
+    session: AsyncSession, monkeypatch
+) -> None:
+    """Two Telegram updates from the same user can be dispatched concurrently
+    (e.g. a rapid double-tap), each opening its own session/middleware call.
+    Both can see "no existing user" before either commits; only one insert
+    wins the UNIQUE constraint on telegram_id. The loser must gracefully
+    return the winner's row, not raise. Forced deterministically here (no
+    reliance on real concurrency timing) by making the first existence
+    check lie.
+    """
+    winner = await repo.get_or_create_user(session, telegram_id=55, username="original")
+    await session.commit()
+
+    real_lookup = repo._get_user_by_telegram_id  # noqa: SLF001
+    calls = {"count": 0}
+
+    async def lying_lookup_once(session: AsyncSession, telegram_id: int):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return None
+        return await real_lookup(session, telegram_id)
+
+    monkeypatch.setattr(repo, "_get_user_by_telegram_id", lying_lookup_once)
+
+    loser_result = await repo.get_or_create_user(session, telegram_id=55, username="original")
+
+    assert loser_result.id == winner.id
+    # The SAVEPOINT rollback must not have poisoned the outer transaction.
+    await repo.log_event(session, winner.id, "start")
+    await session.commit()
+
+
 async def test_foreign_key_enforcement_rejects_orphaned_row(session: AsyncSession) -> None:
     """SQLite ignores FK constraints unless enforcement is turned on per
     connection. Regression test for that being silently off: without the

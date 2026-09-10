@@ -1,0 +1,161 @@
+"""Tests for the AI-facing payload built by app.ai.report_generator and the
+static prompt content. These are all deterministic — no LLM call involved —
+per the project rule that tests must not depend on exact LLM wording.
+
+Coverage requested for the paid-report redesign:
+* internal scoring mechanics (score_breakdown, "+N" contributions, factor
+  names) are structurally excluded from what the AI ever sees;
+* digit-by-digit facts, repeated-digit facts, and pattern facts reach the
+  AI payload unaltered from the deterministic analysis;
+* a highly repetitive number (555555) and a normal mixed number produce
+  correctly differentiated payloads;
+* the static prompt text itself encodes the required score format and the
+  "no disclaimer" / "no Markdown" product rules.
+"""
+
+from __future__ import annotations
+
+import json
+
+from app.ai.prompts import SYSTEM_PROMPT
+from app.ai.report_generator import _build_ai_payload
+from app.analysis.engine import analyze
+from app.analysis.rules import DIGIT_MEANINGS
+
+
+def test_payload_excludes_score_breakdown_entirely() -> None:
+    """The most important guarantee: the AI must never even receive the
+    raw scoring mechanics, so it structurally cannot echo them back.
+    """
+    result = analyze("2200373")
+    payload = _build_ai_payload(result)
+
+    assert "score_breakdown" not in payload
+    assert "algorithm_version" not in payload
+
+    serialized = json.dumps(payload, ensure_ascii=False)
+    assert "score_breakdown" not in serialized
+    # Technical factor names from the scoring engine must never appear.
+    assert "digit_emphasis" not in serialized
+    assert "repeated_pairs_bonus" not in serialized
+
+
+def test_payload_preserves_deterministic_facts_unaltered() -> None:
+    """The AI payload must be a faithful (not lossy, not embellished) view
+    of the deterministic analysis — no invented or dropped facts.
+    """
+    result = analyze("2200373")
+    payload = _build_ai_payload(result)
+
+    assert payload["serial_number"] == result.normalized_number
+    assert payload["digits"] == result.digits
+    assert payload["digit_sum"] == result.digit_sum
+    assert payload["reduced_number"] == result.reduced_number
+    assert payload["repeated_digits"] == result.repeated_digits
+    assert payload["repeated_pairs"] == result.repeated_pairs
+    assert payload["money_score"] == result.money_score
+    assert payload["luck_score"] == result.luck_score
+    assert payload["growth_score"] == result.growth_score
+    assert payload["stability_score"] == result.stability_score
+    assert payload["overall_score"] == result.overall_score
+    assert payload["detected_patterns"] == [
+        {"name": p.name, "description": p.description} for p in result.detected_patterns
+    ]
+
+
+def test_payload_digit_meanings_cover_exactly_the_digits_present() -> None:
+    result = analyze("2200373")
+    payload = _build_ai_payload(result)
+
+    digits_present = {str(d) for d in set(result.digits)}
+    assert set(payload["digit_meanings"].keys()) == digits_present
+    for digit_str, meaning in payload["digit_meanings"].items():
+        assert meaning == DIGIT_MEANINGS[int(digit_str)]
+
+
+def test_payload_reduced_number_meaning_matches_rule_book() -> None:
+    result = analyze("2200373")
+    payload = _build_ai_payload(result)
+    assert payload["reduced_number_meaning"] == DIGIT_MEANINGS[result.reduced_number]
+
+
+def test_payload_for_highly_repetitive_number_555555() -> None:
+    """555555: every digit is 5, so repetition and (if applicable) palindrome
+    facts must be clearly present and correctly attributed to digit 5 only.
+    """
+    result = analyze("555555")
+    payload = _build_ai_payload(result)
+
+    assert payload["digits"] == [5, 5, 5, 5, 5, 5]
+    assert payload["repeated_digits"] == [5]
+    assert payload["digit_frequency"] == {"5": 6}
+    assert set(payload["digit_meanings"].keys()) == {"5"}
+
+    pattern_names = {p["name"] for p in payload["detected_patterns"]}
+    assert "palindrome" in pattern_names
+    assert "single_digit_number" in pattern_names
+
+
+def test_payload_for_normal_mixed_number_has_no_fabricated_repetition() -> None:
+    """A mixed number with no repeated digits must not claim any repetition
+    or patterns that don't actually exist.
+    """
+    result = analyze("1928374")
+    payload = _build_ai_payload(result)
+
+    assert payload["repeated_digits"] == []
+    assert all(count == 1 for count in payload["digit_frequency"].values())
+
+
+def test_payload_pattern_list_empty_when_analysis_finds_nothing() -> None:
+    result = analyze("1928374")
+    if result.detected_patterns:
+        # If this particular number happens to trip a sequence/pair pattern,
+        # the payload must still mirror it exactly — the real assertion is
+        # fidelity, covered by test_payload_preserves_deterministic_facts.
+        return
+    payload = _build_ai_payload(result)
+    assert payload["detected_patterns"] == []
+
+
+def test_payload_is_json_serializable() -> None:
+    """The payload is embedded into the prompt via json.dumps — must never
+    contain non-serializable values (e.g. raw pydantic model instances).
+    """
+    result = analyze("2200373")
+    payload = _build_ai_payload(result)
+    json.dumps(payload, ensure_ascii=False)  # must not raise
+
+
+# --- Static prompt content -----------------------------------------------
+
+
+def test_system_prompt_specifies_exact_score_line_formats() -> None:
+    assert "Денежный потенциал: {money_score}/10" in SYSTEM_PROMPT
+    assert "Энергия удачи: {luck_score}/10" in SYSTEM_PROMPT
+    assert "Энергия роста: {growth_score}/10" in SYSTEM_PROMPT
+    assert "Стабильность: {stability_score}/10" in SYSTEM_PROMPT
+    assert "Общий показатель: {overall_score}/100" in SYSTEM_PROMPT
+
+
+def test_system_prompt_forbids_markdown() -> None:
+    lowered = SYSTEM_PROMPT.lower()
+    assert "markdown" in lowered
+    assert "<b>" in SYSTEM_PROMPT
+    assert "<i>" in SYSTEM_PROMPT
+
+
+def test_system_prompt_forbids_disclaimers() -> None:
+    assert "не является финансовым советом" in SYSTEM_PROMPT  # named as forbidden
+    assert "никогда не добавляй дисклеймеры" in SYSTEM_PROMPT.lower()
+
+
+def test_system_prompt_forbids_raw_scoring_mechanics_leakage() -> None:
+    lowered = SYSTEM_PROMPT.lower()
+    assert "score_breakdown" in lowered
+    assert '"+1"' in SYSTEM_PROMPT or "+6" in SYSTEM_PROMPT  # cited as a forbidden example
+
+
+def test_system_prompt_forbids_guaranteeing_outcomes() -> None:
+    lowered = SYSTEM_PROMPT.lower()
+    assert "гарант" in lowered  # "гарантию" / "гарантировать" etc.

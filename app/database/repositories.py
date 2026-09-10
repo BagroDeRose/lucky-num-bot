@@ -14,19 +14,40 @@ from app.analysis.models import AnalysisResult
 from app.database.models import Analysis, Event, Payment, PaymentStatus, User
 
 
+async def _get_user_by_telegram_id(session: AsyncSession, telegram_id: int) -> User | None:
+    result = await session.execute(select(User).where(User.telegram_id == telegram_id))
+    return result.scalar_one_or_none()
+
+
 async def get_or_create_user(
     session: AsyncSession, telegram_id: int, username: str | None
 ) -> User:
-    result = await session.execute(select(User).where(User.telegram_id == telegram_id))
-    user = result.scalar_one_or_none()
+    """Idempotent creation, hardened against the same class of race as
+    create_pending_payment: two Telegram updates from the same user can be
+    dispatched concurrently (e.g. a rapid double-tap), each opening its own
+    session and both seeing "no existing row" before either commits. Only
+    one insert can win the UNIQUE constraint on telegram_id; the other must
+    gracefully return the winner's row instead of propagating an
+    IntegrityError.
+    """
+    user = await _get_user_by_telegram_id(session, telegram_id)
     if user is not None:
         if username and user.username != username:
             user.username = username
         return user
 
     user = User(telegram_id=telegram_id, username=username)
-    session.add(user)
-    await session.flush()
+    try:
+        async with session.begin_nested():
+            session.add(user)
+            await session.flush()
+    except IntegrityError:
+        user = await _get_user_by_telegram_id(session, telegram_id)
+        if user is not None:
+            if username and user.username != username:
+                user.username = username
+            return user
+        raise
     return user
 
 

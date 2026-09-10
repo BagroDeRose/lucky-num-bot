@@ -37,7 +37,11 @@ async def complete_chat(system_prompt: str, user_prompt: str) -> str:
             {"role": "user", "content": user_prompt},
         ],
         temperature=0.7,
-        max_tokens=1200,
+        # The full paid report has ~10 sections targeting ~2500-3800 Russian
+        # characters (see app.ai.prompts.SYSTEM_PROMPT); Cyrillic tokenizes
+        # less efficiently than English, so this needs meaningfully more
+        # headroom than a short reply.
+        max_tokens=2200,
     )
     content = response.choices[0].message.content
     if not content:
