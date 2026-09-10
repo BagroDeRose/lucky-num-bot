@@ -18,6 +18,10 @@ dependencies = [
     "pydantic-settings>=2.3,<3.0",
     "openai>=1.40,<2.0",
     "aiohttp>=3.9,<4.0",
+    # Explicit CA bundle for the YooKassa HTTPS client — see
+    # app/payments/provider.py:YOOKASSA_SSL_CONTEXT for why this is required
+    # rather than relying on the platform's default OpenSSL cert paths.
+    "certifi>=2024.2.2",
 ]
 
 [project.optional-dependencies]

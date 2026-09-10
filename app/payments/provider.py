@@ -22,11 +22,13 @@ fill in.
 
 from __future__ import annotations
 
+import ssl
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
 import aiohttp
+import certifi
 
 from app.config import settings
 from app.logging import get_logger
@@ -173,6 +175,24 @@ YOOKASSA_REQUEST_TIMEOUT_SECONDS = 35
 # Hard limit documented by the YooKassa API for the `description` field.
 YOOKASSA_DESCRIPTION_MAX_LENGTH = 128
 
+# Explicit CA bundle for TLS verification (never disabled — see _request).
+#
+# aiohttp's default TCPConnector builds its SSL context via
+# ssl.create_default_context() with no `cafile`, which falls back to
+# OpenSSL's compiled-in default paths (ssl.get_default_verify_paths()).
+# On Windows those paths (typically under "Common Files\SSL") frequently
+# don't exist or aren't populated, because Windows keeps its trusted roots
+# in its own certificate store, not there — unlike curl.exe, which uses
+# Windows' native Schannel/WinTrust APIs and so verifies successfully
+# against the very same server. Python's `ssl` module has no equivalent
+# fallback, so the request fails with SSLCertVerificationError even though
+# the server, DNS, and TCP/TLS handshake are all fine. `certifi` ships a
+# maintained, platform-independent CA bundle; pointing the context at it
+# explicitly (via `cafile=certifi.where()`) fixes this without weakening
+# verification in any way — hostname checking and certificate validation
+# both stay fully enabled (ssl.create_default_context()'s defaults).
+YOOKASSA_SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
+
 
 class YooKassaPaymentProvider(PaymentProvider):
     """Real integration against the YooKassa REST API (api.yookassa.ru/v3).
@@ -231,10 +251,17 @@ class YooKassaPaymentProvider(PaymentProvider):
         if idempotence_key:
             headers["Idempotence-Key"] = idempotence_key
         timeout = aiohttp.ClientTimeout(total=YOOKASSA_REQUEST_TIMEOUT_SECONDS)
+        # The connector — not the session — is what actually owns the SSL
+        # context; a plain ClientSession(timeout=...) would silently fall
+        # back to aiohttp's default TCPConnector and its default (OS-path-
+        # dependent) SSL context. Verification stays fully enabled — this
+        # passes a real, trusted CA bundle, never a disabled/unverified
+        # mode — see YOOKASSA_SSL_CONTEXT above for why it's needed.
+        connector = aiohttp.TCPConnector(ssl=YOOKASSA_SSL_CONTEXT)
 
         try:
             async with (
-                aiohttp.ClientSession(timeout=timeout) as http,
+                aiohttp.ClientSession(timeout=timeout, connector=connector) as http,
                 http.request(
                     method,
                     f"{YOOKASSA_API_BASE}{path}",

@@ -4,17 +4,23 @@ real network requests are made against the YooKassa API in the test suite.
 
 from __future__ import annotations
 
+import inspect
+import ssl
+from pathlib import Path
 from unittest.mock import patch
 
 import aiohttp
+import certifi
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.analysis.engine import analyze
 from app.config import settings
 from app.database import repositories as repo
+from app.payments import provider as provider_module
 from app.payments.provider import (
     YOOKASSA_DESCRIPTION_MAX_LENGTH,
+    YOOKASSA_SSL_CONTEXT,
     YooKassaPaymentProvider,
     get_payment_provider,
 )
@@ -245,3 +251,83 @@ async def test_create_payment_leaves_short_description_untouched(monkeypatch) ->
     await provider.create_payment(amount=99, currency="RUB", description="LuckyNum report")
 
     assert captured["description"] == "LuckyNum report"
+
+
+# --- TLS / certificate verification -----------------------------------------
+#
+# Regression coverage for a real production failure: on Windows, aiohttp's
+# default TCPConnector builds its SSL context with no explicit `cafile`,
+# which falls back to OpenSSL's compiled-in default cert paths — paths that
+# often don't exist there, unlike curl.exe (which uses the OS cert store via
+# Schannel). The fix is an explicit ssl.SSLContext built from certifi's CA
+# bundle, never a weakened/disabled verification mode.
+
+
+def test_yookassa_ssl_context_has_verification_enabled() -> None:
+    """The context must require and validate certificates — this is the
+    exact opposite of `ssl=False` / CERT_NONE.
+    """
+    assert YOOKASSA_SSL_CONTEXT.verify_mode == ssl.CERT_REQUIRED
+    assert YOOKASSA_SSL_CONTEXT.check_hostname is True
+
+
+def test_yookassa_ssl_context_uses_the_certifi_bundle() -> None:
+    """Confirms the CA bundle is specifically certifi's — not an empty
+    context, not the platform default paths that caused the original bug.
+    """
+    loaded_certs = YOOKASSA_SSL_CONTEXT.get_ca_certs()
+    assert len(loaded_certs) > 0
+
+    reference = ssl.create_default_context(cafile=certifi.where())
+    assert len(loaded_certs) == len(reference.get_ca_certs())
+
+    # The bundle file certifi reports must actually exist and be non-empty —
+    # guards against a broken/uninstalled certifi silently no-op'ing.
+    bundle_path = Path(certifi.where())
+    assert bundle_path.is_file()
+    assert bundle_path.stat().st_size > 0
+
+
+async def test_request_uses_the_shared_ssl_context_via_tcp_connector(monkeypatch) -> None:
+    """Verifies the actual wiring: _request() must construct its connector
+    with `ssl=YOOKASSA_SSL_CONTEXT`, not rely on aiohttp's default connector
+    (which is what caused the original certificate verification failure).
+    """
+    provider = YooKassaPaymentProvider()
+    captured_kwargs: dict = {}
+    real_init = aiohttp.TCPConnector.__init__
+
+    def spying_init(self, *args, **kwargs):
+        captured_kwargs.update(kwargs)
+        return real_init(self, *args, **kwargs)
+
+    with (
+        patch.object(aiohttp.TCPConnector, "__init__", spying_init),
+        patch.object(aiohttp.ClientSession, "request", side_effect=TimeoutError("t")),
+        pytest.raises(RuntimeError),
+    ):
+        await provider._request("GET", "/payments/x")  # noqa: SLF001
+
+    assert "ssl" in captured_kwargs
+    assert captured_kwargs["ssl"] is YOOKASSA_SSL_CONTEXT
+
+
+def test_no_disabled_or_weakened_tls_verification_in_source() -> None:
+    """Static guardrail: the provider module must never introduce
+    `ssl=False`, `verify_ssl=False`, or an unverified SSL context — any of
+    which would silently defeat certificate verification. This test reads
+    the actual source of app/payments/provider.py, so it fails if such a
+    change is ever reintroduced, even by an edit that doesn't touch the
+    functions tested above.
+    """
+    source = inspect.getsource(provider_module)
+    forbidden_patterns = [
+        "ssl=False",
+        "verify_ssl=False",
+        "CERT_NONE",
+        "check_hostname = False",
+        "check_hostname=False",
+        "_create_unverified_context",
+    ]
+    for pattern in forbidden_patterns:
+        assert pattern not in source, f"found disabled TLS verification pattern: {pattern!r}"
