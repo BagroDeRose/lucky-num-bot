@@ -1,0 +1,60 @@
+from __future__ import annotations
+
+import pytest
+
+from app.analysis.engine import ValidationError, validate_serial_number
+
+
+def test_valid_numeric_number() -> None:
+    assert validate_serial_number("2200373") == "2200373"
+
+
+def test_strips_surrounding_whitespace() -> None:
+    assert validate_serial_number("  2200373  ") == "2200373"
+
+
+def test_preserves_leading_zeroes() -> None:
+    assert validate_serial_number("0012345") == "0012345"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "22A0373",
+        "2200373a",
+        "abcdefg",
+        "22 00373",
+        "2200-373",
+        "22.00373",
+    ],
+)
+def test_rejects_letters_and_symbols(raw: str) -> None:
+    with pytest.raises(ValidationError):
+        validate_serial_number(raw)
+
+
+def test_rejects_empty_input() -> None:
+    with pytest.raises(ValidationError):
+        validate_serial_number("")
+
+
+def test_rejects_whitespace_only_input() -> None:
+    with pytest.raises(ValidationError):
+        validate_serial_number("    ")
+
+
+def test_rejects_too_short() -> None:
+    with pytest.raises(ValidationError):
+        validate_serial_number("12")
+
+
+def test_rejects_too_long() -> None:
+    with pytest.raises(ValidationError):
+        validate_serial_number("1" * 25)
+
+
+def test_error_message_is_user_facing_russian_text() -> None:
+    with pytest.raises(ValidationError) as exc_info:
+        validate_serial_number("abc")
+    assert exc_info.value.message
+    assert "цифр" in exc_info.value.message.lower()

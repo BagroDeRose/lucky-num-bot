@@ -1,0 +1,66 @@
+from __future__ import annotations
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.analysis.engine import analyze
+from app.database import repositories as repo
+from app.payments.provider import MockPaymentProvider
+from app.payments.service import PaymentService
+
+
+async def _make_analysis(session: AsyncSession, telegram_id: int):
+    user = await repo.get_or_create_user(session, telegram_id=telegram_id, username="u")
+    await session.flush()
+    result = analyze("2200373")
+    analysis = await repo.create_analysis(session, user_id=user.id, result=result)
+    await session.commit()
+    return user, analysis
+
+
+async def test_start_payment_creates_pending_payment(session: AsyncSession) -> None:
+    user, analysis = await _make_analysis(session, telegram_id=100)
+    service = PaymentService()
+    service.provider = MockPaymentProvider()
+
+    payment, intent = await service.start_payment(session, user_id=user.id, analysis=analysis)
+    await session.commit()
+
+    assert payment.provider_payment_id == intent.provider_payment_id
+    assert payment.status == "pending"
+
+
+async def test_confirm_payment_is_idempotent_against_duplicate_callbacks(
+    session: AsyncSession,
+) -> None:
+    user, analysis = await _make_analysis(session, telegram_id=101)
+    service = PaymentService()
+    service.provider = MockPaymentProvider()
+
+    payment, intent = await service.start_payment(session, user_id=user.id, analysis=analysis)
+    await session.commit()
+
+    callback_payload = {
+        "provider_payment_id": intent.provider_payment_id,
+        "amount": intent.amount,
+        "currency": intent.currency,
+    }
+
+    first = await service.confirm_payment(session, callback_payload)
+    second = await service.confirm_payment(session, callback_payload)
+    await session.commit()
+
+    assert first is not None
+    assert first.status == "paid"
+    assert second is not None
+    assert second.id == first.id
+    assert second.status == "paid"
+
+
+async def test_confirm_payment_returns_none_for_unknown_id(session: AsyncSession) -> None:
+    service = PaymentService()
+    service.provider = MockPaymentProvider()
+
+    result = await service.confirm_payment(
+        session, {"provider_payment_id": "does-not-exist", "amount": 99, "currency": "RUB"}
+    )
+    assert result is None
