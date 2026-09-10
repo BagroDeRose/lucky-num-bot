@@ -164,6 +164,15 @@ YOOKASSA_API_BASE = "https://api.yookassa.ru/v3"
 # return trip is not what drives our logic; polling verify_payment is.
 YOOKASSA_RETURN_URL = "https://t.me/"
 
+# YooKassa's own docs state they may take up to 30s server-side before
+# giving up and returning HTTP 500. This is set comfortably above that
+# instead of relying on aiohttp's 5-minute default, so a stuck connection
+# fails predictably rather than leaving a Telegram callback hanging.
+YOOKASSA_REQUEST_TIMEOUT_SECONDS = 35
+
+# Hard limit documented by the YooKassa API for the `description` field.
+YOOKASSA_DESCRIPTION_MAX_LENGTH = 128
+
 
 class YooKassaPaymentProvider(PaymentProvider):
     """Real integration against the YooKassa REST API (api.yookassa.ru/v3).
@@ -189,8 +198,10 @@ class YooKassaPaymentProvider(PaymentProvider):
 
     name = "yookassa"
 
-    def _auth(self) -> aiohttp.BasicAuth:
-        return aiohttp.BasicAuth(settings.yookassa_shop_id, settings.yookassa_shop_api_key)
+    def _auth_header(self) -> str:
+        # aiohttp.BasicAuth (the `auth=` request kwarg) is deprecated as of
+        # aiohttp 3.x in favor of building the Authorization header directly.
+        return aiohttp.encode_basic_auth(settings.yookassa_shop_id, settings.yookassa_shop_api_key)
 
     async def _request(
         self,
@@ -200,38 +211,63 @@ class YooKassaPaymentProvider(PaymentProvider):
         json: dict | None = None,
         idempotence_key: str | None = None,
     ) -> dict:
+        """Perform one HTTP call against the YooKassa API.
+
+        Deliberately makes exactly one attempt — no automatic retry. A POST
+        (create_payment) is not safe to blindly retry with a *new*
+        Idempotence-Key: per YooKassa's docs, a different key is treated as
+        a brand-new operation, which would risk creating a duplicate
+        payment. A GET (check_status) is naturally safe to retry, but this
+        MVP's "retry" is simply the user tapping "Проверить оплату" again —
+        adequate at this request volume, and simpler than building
+        backoff/retry logic that has no real payoff here.
+        """
         if not settings.yookassa_configured:
             raise RuntimeError(
                 "YooKassa is not configured (YOOKASSA_SHOP_ID / YOOKASSA_SHOP_API_KEY)"
             )
 
-        headers = {"Idempotence-Key": idempotence_key} if idempotence_key else {}
+        headers = {"Authorization": self._auth_header()}
+        if idempotence_key:
+            headers["Idempotence-Key"] = idempotence_key
+        timeout = aiohttp.ClientTimeout(total=YOOKASSA_REQUEST_TIMEOUT_SECONDS)
 
-        async with (
-            aiohttp.ClientSession() as http,
-            http.request(
-                method,
-                f"{YOOKASSA_API_BASE}{path}",
-                auth=self._auth(),
-                json=json,
-                headers=headers,
-            ) as response,
-        ):
-            data = await response.json()
-            if response.status >= 400:
-                logger.warning(
-                    "YooKassa API error %s on %s %s: %s",
-                    response.status,
+        try:
+            async with (
+                aiohttp.ClientSession(timeout=timeout) as http,
+                http.request(
                     method,
-                    path,
-                    data.get("description") or data.get("type") or "unknown error",
-                )
-                raise RuntimeError(f"YooKassa API error {response.status}")
-            return data
+                    f"{YOOKASSA_API_BASE}{path}",
+                    json=json,
+                    headers=headers,
+                ) as response,
+            ):
+                data = await response.json()
+        except TimeoutError as exc:
+            logger.warning("YooKassa API timeout on %s %s", method, path)
+            raise RuntimeError("YooKassa API request timed out") from exc
+        except aiohttp.ClientError as exc:
+            logger.warning("YooKassa API connection error on %s %s: %s", method, path, exc)
+            raise RuntimeError("YooKassa API connection error") from exc
+
+        if response.status >= 400:
+            logger.warning(
+                "YooKassa API error %s on %s %s: %s",
+                response.status,
+                method,
+                path,
+                data.get("description") or data.get("type") or "unknown error",
+            )
+            raise RuntimeError(f"YooKassa API error {response.status}")
+        return data
 
     async def create_payment(
         self, *, amount: int, currency: str, description: str
     ) -> PaymentIntent:
+        # YooKassa hard-rejects descriptions over 128 characters; truncate
+        # defensively rather than letting an edge-case input fail the call.
+        api_description = description[:YOOKASSA_DESCRIPTION_MAX_LENGTH]
+
         data = await self._request(
             "POST",
             "/payments",
@@ -240,7 +276,7 @@ class YooKassaPaymentProvider(PaymentProvider):
                 "amount": {"value": f"{amount:.2f}", "currency": currency},
                 "confirmation": {"type": "redirect", "return_url": YOOKASSA_RETURN_URL},
                 "capture": True,
-                "description": description,
+                "description": api_description,
             },
         )
         return PaymentIntent(

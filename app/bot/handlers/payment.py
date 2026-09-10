@@ -100,7 +100,16 @@ async def cb_get_report(callback: CallbackQuery, session: AsyncSession, user: Us
         await callback.answer()
         return
 
-    payment, intent = await payment_service.start_payment(session, user_id=user.id, analysis=analysis)
+    try:
+        payment, intent = await payment_service.start_payment(
+            session, user_id=user.id, analysis=analysis
+        )
+    except Exception:  # noqa: BLE001 - e.g. YooKassa network/timeout failure
+        logger.warning("Failed to start payment for analysis %s", analysis.id, exc_info=True)
+        await callback.answer()
+        await cb_answer(callback, texts.YOOKASSA_PAYMENT_ERROR)
+        return
+
     await repo.log_event(
         session, user.id, "payment_created", {"analysis_id": analysis.id, "payment_id": payment.id}
     )
@@ -174,6 +183,17 @@ async def cb_yookassa_check(callback: CallbackQuery, session: AsyncSession, user
         logger.warning("YooKassa status check failed for payment %s", pending.id, exc_info=True)
         await callback.answer()
         await cb_answer(callback, texts.YOOKASSA_PAYMENT_ERROR)
+        return
+
+    if yookassa_payload.get("status") == "canceled":
+        # "canceled" is a final state per YooKassa's API — it will never
+        # become "succeeded". Without this, the payment stays "pending"
+        # forever and the user keeps getting a misleading "not confirmed
+        # yet, try again" on every tap.
+        await repo.mark_payment_failed(session, pending)
+        await session.commit()
+        await callback.answer()
+        await cb_answer(callback, texts.YOOKASSA_PAYMENT_CANCELED)
         return
 
     payment = await payment_service.confirm_payment(session, yookassa_payload)

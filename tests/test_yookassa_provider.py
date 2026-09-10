@@ -4,6 +4,9 @@ real network requests are made against the YooKassa API in the test suite.
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
+import aiohttp
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -11,6 +14,7 @@ from app.analysis.engine import analyze
 from app.config import settings
 from app.database import repositories as repo
 from app.payments.provider import (
+    YOOKASSA_DESCRIPTION_MAX_LENGTH,
     YooKassaPaymentProvider,
     get_payment_provider,
 )
@@ -182,3 +186,62 @@ async def test_payment_service_confirm_is_idempotent_with_yookassa(
 
     assert first is not None and first.status == "paid"
     assert second is not None and second.id == first.id and second.status == "paid"
+
+
+async def test_request_normalizes_timeout_into_runtime_error() -> None:
+    """A stuck/slow connection must fail predictably (and quickly, relative
+    to aiohttp's 5-minute default) rather than hang a Telegram callback.
+    """
+    provider = YooKassaPaymentProvider()
+
+    with (
+        patch.object(aiohttp.ClientSession, "request", side_effect=TimeoutError("timed out")),
+        pytest.raises(RuntimeError, match="timed out"),
+    ):
+        await provider._request("GET", "/payments/x")  # noqa: SLF001
+
+
+async def test_request_normalizes_connection_error_into_runtime_error() -> None:
+    provider = YooKassaPaymentProvider()
+
+    with (
+        patch.object(
+            aiohttp.ClientSession,
+            "request",
+            side_effect=aiohttp.ClientConnectionError("connection refused"),
+        ),
+        pytest.raises(RuntimeError, match="connection error"),
+    ):
+        await provider._request("GET", "/payments/x")  # noqa: SLF001
+
+
+async def test_create_payment_truncates_overlong_description(monkeypatch) -> None:
+    """YooKassa hard-rejects descriptions over 128 characters."""
+    provider = YooKassaPaymentProvider()
+    captured: dict = {}
+
+    async def fake_request(method, path, *, json=None, idempotence_key=None):
+        captured["description"] = json["description"]
+        return {"id": "pay-1", "status": "pending", "confirmation": {}}
+
+    monkeypatch.setattr(provider, "_request", fake_request)
+
+    long_description = "x" * 500
+    await provider.create_payment(amount=99, currency="RUB", description=long_description)
+
+    assert len(captured["description"]) == YOOKASSA_DESCRIPTION_MAX_LENGTH
+
+
+async def test_create_payment_leaves_short_description_untouched(monkeypatch) -> None:
+    provider = YooKassaPaymentProvider()
+    captured: dict = {}
+
+    async def fake_request(method, path, *, json=None, idempotence_key=None):
+        captured["description"] = json["description"]
+        return {"id": "pay-1", "status": "pending", "confirmation": {}}
+
+    monkeypatch.setattr(provider, "_request", fake_request)
+
+    await provider.create_payment(amount=99, currency="RUB", description="LuckyNum report")
+
+    assert captured["description"] == "LuckyNum report"

@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.analysis.engine import analyze
 from app.bot.handlers import payment as payment_module
-from app.bot.handlers.payment import cb_yookassa_check, process_pre_checkout
+from app.bot.handlers.payment import cb_get_report, cb_yookassa_check, process_pre_checkout
 from app.database import repositories as repo
 from app.database.models import PaymentStatus
 from app.payments.provider import MockPaymentProvider, YooKassaPaymentProvider
@@ -202,3 +202,65 @@ async def test_yookassa_check_cannot_access_another_users_analysis(
     callback.answer.assert_awaited_once_with("Анализ не найден.", show_alert=True)
     await session.refresh(payment)
     assert payment.status == "pending"
+
+
+async def test_yookassa_check_marks_canceled_payment_as_failed(
+    session: AsyncSession, monkeypatch
+) -> None:
+    """"canceled" is a final YooKassa state that will never become
+    "succeeded" — it must transition our payment to FAILED, not leave it
+    pending forever with a misleading "try again" message.
+    """
+    user, analysis, payment, intent, provider = await _make_yookassa_pending_payment(
+        session, 404, monkeypatch
+    )
+
+    async def fake_check_status(provider_payment_id):
+        return {
+            "id": intent.provider_payment_id,
+            "status": "canceled",
+            "paid": False,
+            "amount": {"value": f"{intent.amount:.2f}", "currency": intent.currency},
+        }
+
+    monkeypatch.setattr(provider, "check_status", fake_check_status)
+
+    callback = _make_callback(f"yookassa_check:{analysis.id}")
+    await cb_yookassa_check(callback, session, user)
+
+    await session.refresh(payment)
+    assert payment.status == PaymentStatus.FAILED
+    sent_texts = [c.args[1] for c in callback.bot.send_message.await_args_list]
+    assert any("отменён" in t for t in sent_texts)
+
+
+async def test_get_report_shows_friendly_error_when_payment_creation_fails(
+    session: AsyncSession, monkeypatch
+) -> None:
+    """If YooKassa is unreachable when the user taps "get full report", the
+    handler must degrade to a friendly message, not crash or hang.
+    """
+    user = await repo.get_or_create_user(session, telegram_id=405, username="u")
+    await session.flush()
+    result = analyze("2200373")
+    analysis = await repo.create_analysis(session, user_id=user.id, result=result)
+    await session.commit()
+
+    provider = YooKassaPaymentProvider()
+
+    async def failing_create(*, amount, currency, description):
+        raise RuntimeError("YooKassa API connection error")
+
+    monkeypatch.setattr(provider, "create_payment", failing_create)
+    monkeypatch.setattr(payment_module.payment_service, "provider", provider)
+    monkeypatch.setattr(payment_module.settings, "payment_provider", "yookassa")
+
+    callback = _make_callback(f"get_report:{analysis.id}")
+    await cb_get_report(callback, session, user)
+
+    sent_texts = [c.args[1] for c in callback.bot.send_message.await_args_list]
+    assert any("технические неполадки" in t for t in sent_texts)
+
+    # No payment row should have been left behind by the failed attempt.
+    pending = await repo.get_latest_pending_payment(session, analysis.id, user.id)
+    assert pending is None
