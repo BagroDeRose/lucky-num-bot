@@ -134,3 +134,112 @@ async def test_generate_report_wraps_malformed_response_with_no_choices(
 
     with pytest.raises(report_generator.ReportGenerationError):
         await report_generator.generate_report(sample_result)
+
+
+# --- Regression coverage for the max_tokens -> max_completion_tokens fix --
+#
+# Real failure: switching OPENAI_MODEL to a newer model (e.g. gpt-5.4-mini)
+# made every report generation fail with
+#   BadRequestError: Unsupported parameter: 'max_tokens' is not supported
+#   with this model. Use 'max_completion_tokens' instead.
+# Verified empirically (a live, minimal call against the configured model)
+# that `max_completion_tokens` is accepted by gpt-5.4-mini *and* by the
+# older models this project has used as defaults (gpt-3.5-turbo,
+# gpt-4o-mini) — so this is a straight swap, not a per-model branch.
+
+
+async def test_complete_chat_requests_max_completion_tokens_not_max_tokens(monkeypatch) -> None:
+    """The exact parameter name OpenAI's newer models reject if used."""
+    monkeypatch.setattr(settings, "openai_api_key", "test-key")
+    captured_kwargs: dict = {}
+
+    async def fake_create(**kwargs):
+        captured_kwargs.update(kwargs)
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content="ok"),
+                    finish_reason="stop",
+                )
+            ]
+        )
+
+    fake_client = AsyncMock()
+    fake_client.chat.completions.create = fake_create
+    monkeypatch.setattr(ai_client, "get_openai_client", lambda: fake_client)
+
+    await ai_client.complete_chat("system", "user")
+
+    assert "max_completion_tokens" in captured_kwargs
+    assert "max_tokens" not in captured_kwargs
+    assert isinstance(captured_kwargs["max_completion_tokens"], int)
+    assert captured_kwargs["max_completion_tokens"] > 0
+
+
+async def test_complete_chat_succeeds_when_finish_reason_is_stop(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "openai_api_key", "test-key")
+    fake_response = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(content="Готовый отчёт."),
+                finish_reason="stop",
+            )
+        ]
+    )
+    fake_client = AsyncMock()
+    fake_client.chat.completions.create = AsyncMock(return_value=fake_response)
+    monkeypatch.setattr(ai_client, "get_openai_client", lambda: fake_client)
+
+    text = await ai_client.complete_chat("system", "user")
+    assert text == "Готовый отчёт."
+
+
+async def test_complete_chat_raises_when_truncated_by_token_limit(monkeypatch) -> None:
+    """finish_reason="length" means the model was cut off mid-report by the
+    token budget (including, on reasoning-capable models, budget silently
+    consumed by hidden reasoning tokens) — must not be delivered as if it
+    were a complete report.
+    """
+    monkeypatch.setattr(settings, "openai_api_key", "test-key")
+    fake_response = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(content="Отчёт обрывается на полусл"),
+                finish_reason="length",
+            )
+        ]
+    )
+    fake_client = AsyncMock()
+    fake_client.chat.completions.create = AsyncMock(return_value=fake_response)
+    monkeypatch.setattr(ai_client, "get_openai_client", lambda: fake_client)
+
+    with pytest.raises(RuntimeError, match="truncated"):
+        await ai_client.complete_chat("system", "user")
+
+
+async def test_generate_report_recovers_from_truncated_completion(sample_result, monkeypatch) -> None:
+    """The higher-level generate_report() must convert a truncation into the
+    same retryable ReportGenerationError as any other failure — the paid
+    report handler's existing retry button relies on this.
+    """
+    monkeypatch.setattr(settings, "openai_api_key", "test-key")
+
+    async def truncated_complete_chat(system_prompt: str, user_prompt: str) -> str:
+        raise RuntimeError("OpenAI response was truncated before completing")
+
+    monkeypatch.setattr(report_generator, "complete_chat", truncated_complete_chat)
+
+    with pytest.raises(report_generator.ReportGenerationError):
+        await report_generator.generate_report(sample_result)
+
+
+def test_complete_chat_max_completion_tokens_is_configured_reasonably() -> None:
+    """Sanity bound on the token budget: generous enough for the ~2500-3800
+    character Russian report (see app.ai.prompts.SYSTEM_PROMPT), but capped
+    well short of "unbounded", so a misbehaving model can't silently rack up
+    an oversized bill on a single report.
+    """
+    import inspect
+
+    source = inspect.getsource(ai_client.complete_chat)
+    assert "max_completion_tokens=2200" in source

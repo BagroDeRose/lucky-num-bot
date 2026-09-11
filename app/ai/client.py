@@ -37,13 +37,31 @@ async def complete_chat(system_prompt: str, user_prompt: str) -> str:
             {"role": "user", "content": user_prompt},
         ],
         temperature=0.7,
-        # The full paid report has ~10 sections targeting ~2500-3800 Russian
+        # `max_completion_tokens`, not the older `max_tokens`: OpenAI's Chat
+        # Completions API rejects `max_tokens` outright for newer models
+        # (confirmed against gpt-5.4-mini: "Unsupported parameter: 'max_tokens'
+        # is not supported with this model. Use 'max_completion_tokens'
+        # instead."), while `max_completion_tokens` is accepted by both that
+        # and every older model this project has used (gpt-3.5-turbo,
+        # gpt-4o-mini) — verified empirically, not just per changelog. The
+        # full paid report has ~10 sections targeting ~2500-3800 Russian
         # characters (see app.ai.prompts.SYSTEM_PROMPT); Cyrillic tokenizes
         # less efficiently than English, so this needs meaningfully more
         # headroom than a short reply.
-        max_tokens=2200,
+        max_completion_tokens=2200,
     )
-    content = response.choices[0].message.content
+    choice = response.choices[0]
+    content = choice.message.content
     if not content:
         raise RuntimeError("OpenAI returned an empty response")
+    if choice.finish_reason == "length":
+        # The model was cut off mid-report rather than finishing naturally
+        # (on a reasoning-capable model this can happen even with content
+        # present, if hidden reasoning tokens ate into the same budget).
+        # Surfacing this as a failure is safer than silently sending a
+        # truncated/malformed paid report — the caller's existing retry
+        # path (ReportGenerationError) handles it the same as any other
+        # generation failure.
+        logger.warning("OpenAI response truncated by max_completion_tokens (finish_reason=length)")
+        raise RuntimeError("OpenAI response was truncated before completing")
     return content.strip()
