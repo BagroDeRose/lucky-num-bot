@@ -125,6 +125,53 @@ async def test_start_does_not_reset_an_existing_paid_report(session: AsyncSessio
     assert analysis.report == "Уже готовый отчёт."
 
 
+async def test_start_does_not_touch_an_unpaid_analysis(session: AsyncSession) -> None:
+    """A user with a free teaser they haven't paid for yet: /start must not
+    mark it paid, delete it, or otherwise alter it — just navigate home.
+    """
+    from app.analysis.engine import analyze
+
+    user = await repo.get_or_create_user(session, telegram_id=706, username="u")
+    await session.flush()
+    result = analyze("2200373")
+    analysis = await repo.create_analysis(session, user_id=user.id, result=result)
+    await session.commit()
+
+    message = AsyncMock(wraps=_make_message())
+    state = AsyncMock()
+    await cmd_start(message, state, session, user)
+
+    await session.refresh(analysis)
+    assert analysis.paid is False
+    assert analysis.report is None
+
+
+async def test_start_does_not_touch_a_paid_analysis_awaiting_its_report(
+    session: AsyncSession,
+) -> None:
+    """Distinct from the "already has a report" case above: a paid analysis
+    with no report yet (e.g. generation hadn't started/finished) is the most
+    sensitive state to disturb — /start must not trigger generation for it
+    or otherwise change analysis.paid/analysis.report.
+    """
+    from app.analysis.engine import analyze
+
+    user = await repo.get_or_create_user(session, telegram_id=707, username="u")
+    await session.flush()
+    result = analyze("2200373")
+    analysis = await repo.create_analysis(session, user_id=user.id, result=result)
+    await repo.mark_analysis_paid(session, analysis)
+    await session.commit()
+
+    message = AsyncMock(wraps=_make_message())
+    state = AsyncMock()
+    await cmd_start(message, state, session, user)
+
+    await session.refresh(analysis)
+    assert analysis.paid is True
+    assert analysis.report is None
+
+
 async def test_help_returns_expected_content() -> None:
     message = AsyncMock(wraps=_make_message())
     await cmd_help(message)
@@ -133,8 +180,10 @@ async def test_help_returns_expected_content() -> None:
     sent_text = message.answer.await_args.args[0]
     assert sent_text == texts.HELP
     # Answers the questions a lost user actually has, per the product brief:
-    # how to start, where the full report comes from, what happens on
-    # failure, and how to get back to the beginning.
+    # what LuckyNum is (must stand on its own — /help is reachable without
+    # first seeing /start's WELCOME text), how to start, where the full
+    # report comes from, what happens on failure, and how to return home.
+    assert "купюр" in sent_text.lower()  # states what the bot is about
     assert "/analyze" in sent_text or "Проверить купюру" in sent_text
     assert "разбор" in sent_text.lower()
     assert "Попробовать ещё раз" in sent_text
@@ -166,6 +215,38 @@ async def test_about_command_is_registered_with_command_filter() -> None:
         assert handlers, f"{handler_fn.__name__} not registered on the router"
         command_filters = [f.callback for f in handlers[0].filters if isinstance(f.callback, Command)]
         assert command_filters, f"{handler_fn.__name__} must use the Command(...) filter"
+
+
+async def test_help_and_start_match_with_bot_username_suffix() -> None:
+    """Proves the actual behavioral claim, not just the filter's type:
+    Telegram sends "/help@BotName" (with the bot's own username appended)
+    in some contexts — group chats, and some clients always append it. The
+    old `F.text == "/help"` equality check would silently never match this
+    form; aiogram's Command filter resolves the mention against the bot's
+    real username via `bot.me()`.
+    """
+    from types import SimpleNamespace
+
+    from aiogram.filters import CommandStart
+
+    bot = AsyncMock()
+    bot.me = AsyncMock(return_value=SimpleNamespace(username="LuckyNumBot"))
+
+    def make_message(text: str) -> Message:
+        return Message(
+            message_id=1,
+            date=dt.datetime.now(dt.UTC),
+            chat=Chat(id=555, type="private"),
+            text=text,
+        )
+
+    assert await Command("help")(make_message("/help@LuckyNumBot"), bot)
+    assert await Command("help")(make_message("/help"), bot)
+    assert await CommandStart()(make_message("/start@LuckyNumBot"), bot)
+
+    # A mention for a *different* bot must not match — this is what proves
+    # the mention is actually being checked, not silently ignored.
+    assert not await Command("help")(make_message("/help@SomeOtherBot"), bot)
 
 
 async def test_main_menu_callback_returns_to_welcome() -> None:

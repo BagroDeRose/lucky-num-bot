@@ -559,3 +559,15 @@ async def test_generation_attempt_limit_stops_further_openai_calls_after_repeate
     from app.bot.keyboards.main import back_to_start_kb
 
     assert sent[2][1] == back_to_start_kb()
+
+    # The message must not falsely promise a future retry will work — the
+    # cap is permanent for this analysis within the process's lifetime, so
+    # "come back later, we'll try again" would be a lie. Must also never
+    # leak the mechanism (config var names, "OpenAI", API/exception details,
+    # attempt counts) behind the refusal.
+    limit_text = texts.REPORT_GENERATION_LIMIT_REACHED
+    lowered = limit_text.lower()
+    for false_promise in ("попробуем ещё раз", "попозже", "позже", "чуть позже"):
+        assert false_promise not in lowered
+    for leak in ("openai", "api", "лимит", "попыт", "gpt", "ai_max_generation"):
+        assert leak not in lowered

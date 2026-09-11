@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.analysis.interpreter import render_teaser
 from app.analysis.models import AnalysisResult
 from app.bot import texts
-from app.bot.keyboards.main import history_kb, teaser_kb
+from app.bot.keyboards.main import after_report_kb, history_kb, teaser_kb
 from app.bot.utils import cb_answer, require_callback_data
 from app.database import repositories as repo
 from app.database.models import User
@@ -55,7 +55,7 @@ async def cb_history_view(callback: CallbackQuery, session: AsyncSession, user: 
         return
 
     if analysis.paid and analysis.report:
-        await cb_answer(callback, analysis.report)
+        await cb_answer(callback, analysis.report, reply_markup=after_report_kb())
     else:
         result = AnalysisResult.model_validate(analysis.analysis_payload)
         await cb_answer(callback, render_teaser(result), reply_markup=teaser_kb(analysis.id))

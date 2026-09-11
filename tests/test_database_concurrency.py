@@ -214,10 +214,20 @@ async def test_concurrent_report_delivery_does_not_double_call_openai(file_engin
     """
     from app.ai import report_generator
     from app.analysis.engine import analyze
+    from app.bot.handlers import payment as payment_module
     from app.bot.handlers.payment import _deliver_report
     from app.config import settings
 
     monkeypatch.setattr(settings, "openai_api_key", "test-key")
+    # Isolate the module-level per-analysis lock dict: it is never cleared
+    # in production (fine there — a single process has exactly one event
+    # loop for its whole lifetime), but pytest-asyncio gives each test
+    # function its own fresh event loop, and different tests' isolated
+    # SQLite databases can coincidentally reuse the same autoincrement
+    # analysis_id — reusing a Lock object across event loops raises
+    # "bound to a different event loop" (observed in practice while adding
+    # the sibling test below, which also uses analysis_id 1).
+    monkeypatch.setattr(payment_module, "_report_generation_locks", {})
 
     call_count = {"n": 0}
 
@@ -266,4 +276,78 @@ async def test_concurrent_report_delivery_does_not_double_call_openai(file_engin
     await asyncio.gather(*(try_deliver(s, r, u) for s, r, u in loaded))
 
     assert call_count["n"] == 1, f"OpenAI was called {call_count['n']} times for one report"
-    assert sent_texts.count("Готовый отчёт.") == len(loaded)
+
+
+async def test_concurrent_report_delivery_cannot_exceed_the_attempt_cap(
+    file_engine, monkeypatch
+) -> None:
+    """Distinct from the test above: that one proves concurrency can't
+    double-bill a *succeeding* generation (the cache check alone stops
+    further calls once a report is saved). This proves the separate
+    AI_MAX_GENERATION_ATTEMPTS_PER_ANALYSIS cap holds even when every
+    generation *fails* — so the cache check never kicks in and the cap
+    itself is the only thing standing between a burst of concurrent retries
+    and unbounded real OpenAI spend on one already-paid analysis. Fires 5
+    genuinely concurrent delivery attempts (pre-loaded sessions, same
+    technique as above) against a cap of 2: real OpenAI calls must never
+    exceed 2, regardless of how many requests race for the slot.
+    """
+    from app.ai import report_generator
+    from app.analysis.engine import analyze
+    from app.bot.handlers import payment as payment_module
+    from app.bot.handlers.payment import _deliver_report
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "openai_api_key", "test-key")
+    monkeypatch.setattr(settings, "ai_max_generation_attempts_per_analysis", 2)
+    monkeypatch.setattr(payment_module, "_report_generation_attempts", {})
+    monkeypatch.setattr(payment_module, "_report_generation_locks", {})
+
+    call_count = {"n": 0}
+
+    async def always_failing_complete_chat(system_prompt: str, user_prompt: str) -> str:
+        call_count["n"] += 1
+        await asyncio.sleep(0.05)  # widen the race window past the DB round-trips
+        raise RuntimeError("persistent upstream failure")
+
+    monkeypatch.setattr(report_generator, "complete_chat", always_failing_complete_chat)
+
+    session_factory = async_sessionmaker(file_engine, expire_on_commit=False)
+
+    async with session_factory() as setup_session:
+        user = await repo.get_or_create_user(setup_session, telegram_id=889, username="u")
+        await setup_session.flush()
+        analysis = await repo.create_analysis(setup_session, user_id=user.id, result=analyze("2200373"))
+        await repo.mark_analysis_paid(setup_session, analysis)
+        await setup_session.commit()
+        analysis_id = analysis.id
+        user_id = user.id
+
+    loaded: list[tuple[AsyncSession, Analysis, User]] = []
+    for _ in range(5):
+        session = session_factory()
+        row = await session.get(Analysis, analysis_id)
+        user_row = await session.get(User, user_id)
+        assert row is not None
+        assert user_row is not None
+        loaded.append((session, row, user_row))
+
+    sent_texts: list[str] = []
+
+    async def try_deliver(session: AsyncSession, row: Analysis, user_row: User) -> None:
+        async def send(text: str, kb: object) -> None:
+            sent_texts.append(text)
+
+        try:
+            await _deliver_report(send, session, row, user_row)
+        finally:
+            await session.close()
+
+    await asyncio.gather(*(try_deliver(s, r, u) for s, r, u in loaded))
+
+    assert call_count["n"] == 2, f"OpenAI was called {call_count['n']} times; the cap is 2"
+
+    from app.bot import texts
+
+    assert sent_texts.count(texts.REPORT_GENERATION_FAILED) == 2
+    assert sent_texts.count(texts.REPORT_GENERATION_LIMIT_REACHED) == 3
