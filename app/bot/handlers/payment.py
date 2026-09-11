@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 
 from aiogram import F, Router
@@ -37,6 +38,28 @@ payment_service = PaymentService()
 
 Sender = Callable[[str, InlineKeyboardMarkup | None], Awaitable[None]]
 
+# Serializes report generation per analysis within this process. The bot
+# runs as a single long-polling instance (see README "Deployment notes" —
+# no horizontal scaling), so an in-memory lock is sufficient: without it, a
+# rapid double-tap on "Открыть полный разбор"/"Попробовать ещё раз" (each
+# dispatched as a separate update with its own DB session) can have both
+# updates see analysis.report as still empty before either commits, both
+# call the real OpenAI API, and both deliver the report — doubling AI spend
+# for a single paid report. Keyed by analysis_id (not a single global lock)
+# so generating one user's report never blocks another's. Entries are never
+# evicted, but each is a tiny asyncio.Lock and the number of analyses ever
+# created is bounded by real usage, so this is not a meaningful leak at this
+# product's scale.
+_report_generation_locks: dict[int, asyncio.Lock] = {}
+
+
+def _lock_for_analysis(analysis_id: int) -> asyncio.Lock:
+    lock = _report_generation_locks.get(analysis_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _report_generation_locks[analysis_id] = lock
+    return lock
+
 
 def _message_sender(message: Message) -> Sender:
     async def send(text: str, kb: InlineKeyboardMarkup | None) -> None:
@@ -62,26 +85,35 @@ async def _deliver_report(send: Sender, session: AsyncSession, analysis: Analysi
         await send(analysis.report, after_report_kb())
         return
 
-    await repo.log_event(session, user.id, "report_generation_started", {"analysis_id": analysis.id})
-    await session.commit()
+    async with _lock_for_analysis(analysis.id):
+        # Re-check after acquiring the lock: if a concurrent call for the
+        # same analysis just finished generating while we were waiting, its
+        # commit is now visible — use it instead of generating a second time.
+        await session.refresh(analysis)
+        if analysis.report:
+            await send(analysis.report, after_report_kb())
+            return
 
-    try:
-        result = AnalysisResult.model_validate(analysis.analysis_payload)
-        report_text = await generate_report(result)
-    except ReportGenerationError as exc:
-        logger.warning("Report generation failed for analysis %s: %s", analysis.id, exc)
-        await repo.log_event(
-            session, user.id, "report_generation_failed", {"analysis_id": analysis.id}
-        )
+        await repo.log_event(session, user.id, "report_generation_started", {"analysis_id": analysis.id})
         await session.commit()
-        await send(texts.REPORT_GENERATION_FAILED, retry_report_kb(analysis.id))
-        return
 
-    await repo.save_report(session, analysis, report_text)
-    await repo.log_event(session, user.id, "report_generation_success", {"analysis_id": analysis.id})
-    await session.commit()
+        try:
+            result = AnalysisResult.model_validate(analysis.analysis_payload)
+            report_text = await generate_report(result)
+        except ReportGenerationError as exc:
+            logger.warning("Report generation failed for analysis %s: %s", analysis.id, exc)
+            await repo.log_event(
+                session, user.id, "report_generation_failed", {"analysis_id": analysis.id}
+            )
+            await session.commit()
+            await send(texts.REPORT_GENERATION_FAILED, retry_report_kb(analysis.id))
+            return
 
-    await send(report_text, after_report_kb())
+        await repo.save_report(session, analysis, report_text)
+        await repo.log_event(session, user.id, "report_generation_success", {"analysis_id": analysis.id})
+        await session.commit()
+
+        await send(report_text, after_report_kb())
 
 
 @router.callback_query(F.data.startswith("get_report:"))

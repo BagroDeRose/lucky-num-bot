@@ -103,6 +103,18 @@ def render_teaser(result: AnalysisResult) -> str:
 _MID_CONNECTORS_SINGULAR = ("Дальше идёт", "Следом", "Затем появляется", "После этого")
 _MID_CONNECTORS_PLURAL = ("Дальше идут", "Следом", "Затем появляются", "После этого")
 
+# Rotated (not fixed) so a number with several separate multi-digit runs
+# (e.g. "1122334455") doesn't chant the exact same closing clause — and
+# "усиливает" is deliberately avoided here since it's one of the words the
+# AI-generated report is told to stop overusing; the deterministic fallback
+# should hold to the same product voice.
+_REPEAT_EMPHASIS_TAILS = (
+    "и это не случайная деталь",
+    "и повтор здесь явно неслучаен",
+    "заметно задавая тон всей комбинации",
+    "и это сразу бросается в глаза",
+)
+
 
 def _render_opening(result: AnalysisResult) -> str:
     pattern_names = {p.name for p in result.detected_patterns}
@@ -193,7 +205,8 @@ def _render_digit_story(result: AnalysisResult) -> str:
             else:
                 connector = _MID_CONNECTORS_PLURAL[(i - 1) % len(_MID_CONNECTORS_PLURAL)]
                 lead = f"{connector} {_count_phrase(count)} {digit} подряд"
-            sentence = f"{lead} — {meaning}, и повтор явно усиливает эту тему."
+            tail = _REPEAT_EMPHASIS_TAILS[i % len(_REPEAT_EMPHASIS_TAILS)]
+            sentence = f"{lead} — {meaning}, {tail}."
         else:
             if is_first:
                 sentence = f"Номер начинается с цифры {digit} — {meaning}."

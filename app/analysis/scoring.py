@@ -89,7 +89,7 @@ def detect_patterns(digits: list[int], normalized_number: str) -> list[DetectedP
         patterns.append(
             DetectedPattern(
                 name=f"repeated_digit_{d}",
-                description=f"Цифра {d} встречается {freq[d]} раз(а) — усиленное влияние.",
+                description=f"Цифра {d} встречается в номере {freq[d]} раз(а).",
             )
         )
 

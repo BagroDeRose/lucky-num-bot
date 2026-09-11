@@ -7,7 +7,11 @@ without any LLM dependency.
 from __future__ import annotations
 
 from app.analysis.engine import analyze
-from app.analysis.interpreter import render_fallback_full_report, render_teaser
+from app.analysis.interpreter import (
+    _REPEAT_EMPHASIS_TAILS,
+    render_fallback_full_report,
+    render_teaser,
+)
 from app.formatting import to_telegram_html
 
 
@@ -95,12 +99,40 @@ def test_fallback_report_digit_story_mentions_every_digit_meaning_in_order() -> 
 
 def test_fallback_report_flags_adjacent_repeated_digits() -> None:
     """2200373 has two adjacent-repeat runs ("22" and "00") — both must be
-    called out as reinforcing their theme.
+    called out as reinforcing their theme. The two mentions must use
+    different closing clauses (see _REPEAT_EMPHASIS_TAILS) rather than
+    chanting the exact same sentence twice in one paragraph.
     """
     result = analyze("2200373")
     report = render_fallback_full_report(result)
     assert result.repeated_pairs == ["22", "00"]
-    assert report.count("и повтор явно усиливает эту тему") == 2
+    tails_present = [t for t in _REPEAT_EMPHASIS_TAILS if t in report]
+    assert len(tails_present) == 2
+    assert len(set(tails_present)) == 2  # distinct wording, not repeated
+
+
+def test_fallback_report_many_repeated_runs_do_not_chant_the_same_sentence() -> None:
+    """Regression test: a number with several separate multi-digit runs
+    (e.g. "1122334455" — five distinct "XX" runs) must not repeat the exact
+    same closing clause for every run. Before the fix, every run used the
+    literal phrase "и повтор явно усиливает эту тему" verbatim, producing a
+    "История цифр" paragraph that chanted the same sentence five times and
+    overused the word "усиливает" — exactly the mechanical repetition and
+    filler-word overuse the product's AI report is also told to avoid.
+    """
+    result = analyze("1122334455")
+    report = render_fallback_full_report(result)
+
+    assert "усиливает" not in report.lower()
+
+    start = report.index("🔎 <b>История цифр</b>")
+    end = report.index("✨", start) if "✨" in report[start:] else len(report)
+    story = report[start:end]
+    tail_occurrences = [tail for tail in _REPEAT_EMPHASIS_TAILS for _ in range(story.count(tail))]
+    # 5 runs of length 2 ("11","22","33","44","55") -> 5 emphasized mentions,
+    # cycling through a 4-entry rotation so at most one repeat, never all 5 identical.
+    assert len(tail_occurrences) == 5
+    assert len(set(tail_occurrences)) >= 4
 
 
 def test_fallback_report_flags_a_non_adjacent_returning_digit() -> None:
@@ -118,7 +150,7 @@ def test_fallback_report_normal_mixed_number_has_no_repetition_notes() -> None:
     report = render_fallback_full_report(result)
     assert result.repeated_digits == []
     assert result.repeated_pairs == []
-    assert "повтор явно усиливает эту тему" not in report
+    assert not any(tail in report for tail in _REPEAT_EMPHASIS_TAILS)
     assert "уже не впервые" not in report
 
 

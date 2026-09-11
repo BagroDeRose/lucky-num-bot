@@ -28,7 +28,7 @@ from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.database import repositories as repo
-from app.database.models import Base, Payment
+from app.database.models import Analysis, Base, Payment, User
 from app.database.session import _configure_sqlite_connection
 
 
@@ -200,3 +200,70 @@ async def test_concurrent_mark_payment_paid_transitions_exactly_once(file_engine
     outcomes = await asyncio.gather(*(try_confirm(s, r) for s, r in loaded))
     assert outcomes.count(True) == 1
     assert outcomes.count(False) == 4
+
+
+async def test_concurrent_report_delivery_does_not_double_call_openai(file_engine, monkeypatch) -> None:
+    """Regression test for a real race distinct from the payment-confirm one
+    above: two concurrent deliveries of the report for the same *already
+    paid* analysis (e.g. a rapid double-tap on "Открыть полный разбор" on an
+    already-paid analysis, or on "Попробовать ещё раз") can each see
+    analysis.report as still empty before either commits, and both proceed
+    to call OpenAI and save — doubling real AI spend and sending the report
+    to the user twice. Only one of N concurrent callers may trigger
+    generation; the rest must fall back to the winner's result instead.
+    """
+    from app.ai import report_generator
+    from app.analysis.engine import analyze
+    from app.bot.handlers.payment import _deliver_report
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "openai_api_key", "test-key")
+
+    call_count = {"n": 0}
+
+    async def fake_complete_chat(system_prompt: str, user_prompt: str) -> str:
+        call_count["n"] += 1
+        await asyncio.sleep(0.05)  # widen the race window past the DB round-trips
+        return "Готовый отчёт."
+
+    monkeypatch.setattr(report_generator, "complete_chat", fake_complete_chat)
+
+    session_factory = async_sessionmaker(file_engine, expire_on_commit=False)
+
+    async with session_factory() as setup_session:
+        user = await repo.get_or_create_user(setup_session, telegram_id=888, username="u")
+        await setup_session.flush()
+        analysis = await repo.create_analysis(setup_session, user_id=user.id, result=analyze("2200373"))
+        await repo.mark_analysis_paid(setup_session, analysis)
+        await setup_session.commit()
+        analysis_id = analysis.id
+        user_id = user.id
+
+    # Pre-load N independent sessions/rows, each still seeing report=None,
+    # before any of them attempts delivery — same technique as the
+    # mark_payment_paid race above, required to actually expose the bug
+    # rather than let SQLite's single-writer lock serialize the reads.
+    loaded: list[tuple[AsyncSession, Analysis, User]] = []
+    for _ in range(3):
+        session = session_factory()
+        row = await session.get(Analysis, analysis_id)
+        user_row = await session.get(User, user_id)
+        assert row is not None
+        assert user_row is not None
+        loaded.append((session, row, user_row))
+
+    sent_texts: list[str] = []
+
+    async def try_deliver(session: AsyncSession, row: Analysis, user_row: User) -> None:
+        async def send(text: str, kb: object) -> None:
+            sent_texts.append(text)
+
+        try:
+            await _deliver_report(send, session, row, user_row)
+        finally:
+            await session.close()
+
+    await asyncio.gather(*(try_deliver(s, r, u) for s, r, u in loaded))
+
+    assert call_count["n"] == 1, f"OpenAI was called {call_count['n']} times for one report"
+    assert sent_texts.count("Готовый отчёт.") == len(loaded)
