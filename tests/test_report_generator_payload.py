@@ -138,6 +138,22 @@ def test_system_prompt_specifies_exact_score_line_formats() -> None:
     assert "ИТОГ — {overall_score}/100" in SYSTEM_PROMPT
 
 
+def test_system_prompt_shows_section_headers_explicitly_wrapped_in_bold_tags() -> None:
+    """Regression test: live generations showed inconsistent header bolding
+    (bold in some reports, plain in others) when the instructions only
+    *described* headers as "bold" without showing the literal <b> wrapping
+    in the worked examples — the model partly pattern-matched the unwrapped
+    examples instead. Every header example must now show the literal tag.
+    """
+    assert "🔮 <b>ДЕНЕЖНЫЙ РАЗБОР</b>" in SYSTEM_PROMPT
+    assert "🔢 <b>ГЛАВНОЕ ЧИСЛО — N</b>" in SYSTEM_PROMPT
+    assert "🔎 <b>ИСТОРИЯ ЦИФР</b>" in SYSTEM_PROMPT
+    assert "✨ <b>ОСОБЫЕ СОЧЕТАНИЯ</b>" in SYSTEM_PROMPT
+    assert "💰 <b>ДЕНЕЖНЫЙ ПРОФИЛЬ — {money_score}/10</b>" in SYSTEM_PROMPT
+    assert "⭐ <b>ИТОГ — {overall_score}/100</b>" in SYSTEM_PROMPT
+    assert "💥 <b>ВЕРДИКТ ЖМЫХА</b>" in SYSTEM_PROMPT
+
+
 def test_system_prompt_forbids_markdown() -> None:
     lowered = SYSTEM_PROMPT.lower()
     assert "markdown" in lowered
@@ -179,3 +195,92 @@ def test_system_prompt_bans_overused_filler_words() -> None:
 def test_system_prompt_requires_555555_style_numbers_to_lead_with_dominance() -> None:
     lowered = SYSTEM_PROMPT.lower()
     assert "dominance" in lowered or "dominat" in lowered
+
+
+# --- New requirements from the "fewer facts, more personalization" redesign
+
+
+def test_system_prompt_targets_shorter_length() -> None:
+    """Product direction: 1500-2500 chars normal, ~3000 for exceptional
+    numbers — a significant reduction from the previous 600-1000 word /
+    2500-3800 char target, and explicitly never close to Telegram's limit.
+    """
+    assert "1500-2500" in SYSTEM_PROMPT
+    assert "3000 characters" in SYSTEM_PROMPT
+    assert "600-1000" not in SYSTEM_PROMPT
+    lowered = SYSTEM_PROMPT.lower()
+    assert "4096" in lowered
+
+
+def test_system_prompt_states_fewer_facts_more_personalization_principle() -> None:
+    lowered = SYSTEM_PROMPT.lower()
+    assert "fewer facts" in lowered
+    assert "more personalization" in lowered
+
+
+def test_system_prompt_requires_self_check_against_repetition() -> None:
+    lowered = SYSTEM_PROMPT.lower()
+    assert "mentally re-read" in lowered or "merge them" in lowered
+
+
+def test_system_prompt_forbids_inventing_rarity_and_historical_claims() -> None:
+    lowered = SYSTEM_PROMPT.lower()
+    assert "rarity" in lowered
+    assert "historical" in lowered
+    assert "psychological" in lowered
+
+
+def test_system_prompt_forbids_inventing_positional_meanings() -> None:
+    lowered = SYSTEM_PROMPT.lower()
+    assert "position" in lowered
+
+
+def test_system_prompt_forbids_recomputing_scores() -> None:
+    lowered = SYSTEM_PROMPT.lower()
+    assert "recompute" in lowered or "recalculate" in lowered
+
+
+def test_system_prompt_forbids_revealing_the_underlying_machinery() -> None:
+    """New in this redesign: don't just avoid disclaimers — never reveal
+    that a report came from "the algorithm"/"the model"/"the system" at all.
+    """
+    lowered = SYSTEM_PROMPT.lower()
+    assert "according to the algorithm" in lowered
+    assert "the system calculated" in lowered
+    assert "i am an ai" in lowered
+
+
+def test_system_prompt_bans_expanded_filler_word_list() -> None:
+    lowered = SYSTEM_PROMPT.lower()
+    for banned in (
+        "энергетика",
+        "усиливает влияние",
+        "подчёркивает важность",
+        "создаёт ощущение",
+        "гармония",
+        "внутренний баланс",
+        "потенциал",
+        "уникальный",
+        "особенный",
+        "сильный",
+        "мощный",
+    ):
+        assert banned in lowered
+
+
+def test_system_prompt_gives_bad_vs_good_verdict_example() -> None:
+    """The generic-motivational-quote example must be explicitly named as
+    what NOT to write, per the product brief's worked example.
+    """
+    assert "Успех приходит к тем, кто готов двигаться" in SYSTEM_PROMPT
+
+
+def test_system_prompt_only_allows_alternating_rhythm_via_digit_story_not_invented_pattern() -> None:
+    """121212-style numbers: the engine has no explicit "alternating"
+    pattern flag, so the prompt must guide the model to notice this from
+    the real digit sequence (a fact) inside ИСТОРИЯ ЦИФР, while still
+    forbidding it from being asserted in ОСОБЫЕ СОЧЕТАНИЯ unless the JSON's
+    own detected_patterns/repeated_digits actually names it.
+    """
+    lowered = SYSTEM_PROMPT.lower()
+    assert "alternating" in lowered

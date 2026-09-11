@@ -43,12 +43,20 @@ async def complete_chat(system_prompt: str, user_prompt: str) -> str:
         # is not supported with this model. Use 'max_completion_tokens'
         # instead."), while `max_completion_tokens` is accepted by both that
         # and every older model this project has used (gpt-3.5-turbo,
-        # gpt-4o-mini) — verified empirically, not just per changelog. The
-        # full paid report has ~10 sections targeting ~2500-3800 Russian
-        # characters (see app.ai.prompts.SYSTEM_PROMPT); Cyrillic tokenizes
-        # less efficiently than English, so this needs meaningfully more
-        # headroom than a short reply.
-        max_completion_tokens=2200,
+        # gpt-4o-mini) — verified empirically, not just per changelog.
+        #
+        # The report prompt now targets ~1500-2500 Russian characters
+        # ("fewer facts, more personalization" — see app.ai.prompts.
+        # SYSTEM_PROMPT), down from the earlier ~2500-3800 target. Live
+        # calls against the configured model at that target used 768-828
+        # completion tokens per report (~3.1-3.2 chars/token for this
+        # content). 1400 leaves ~40% headroom above the largest number
+        # observed (a "dominant single digit" report, the kind most likely
+        # to run long) without provisioning for a report far bigger than
+        # the prompt actually asks for — lower than 2200 mainly because the
+        # target length itself came down, not because of anything model-
+        # specific.
+        max_completion_tokens=1400,
     )
     choice = response.choices[0]
     content = choice.message.content

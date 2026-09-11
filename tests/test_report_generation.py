@@ -234,12 +234,15 @@ async def test_generate_report_recovers_from_truncated_completion(sample_result,
 
 
 def test_complete_chat_max_completion_tokens_is_configured_reasonably() -> None:
-    """Sanity bound on the token budget: generous enough for the ~2500-3800
-    character Russian report (see app.ai.prompts.SYSTEM_PROMPT), but capped
-    well short of "unbounded", so a misbehaving model can't silently rack up
-    an oversized bill on a single report.
+    """Sanity bound on the token budget: generous enough for the ~1500-2500
+    (up to ~3000 for exceptional numbers) character Russian report target
+    (see app.ai.prompts.SYSTEM_PROMPT — the "fewer facts, more
+    personalization" redesign), but capped well short of "unbounded", so a
+    misbehaving model can't silently rack up an oversized bill on a single
+    report. 1400 was set from live measurements: real reports at this
+    target used 768-828 completion tokens per call.
     """
     import inspect
 
     source = inspect.getsource(ai_client.complete_chat)
-    assert "max_completion_tokens=2200" in source
+    assert "max_completion_tokens=1400" in source
