@@ -46,6 +46,7 @@ _MD_ITALIC = re.compile(r"(?<!\*)\*([^*\n]*[^\s*][^*\n]*)\*(?!\*)")
 _MD_CODE = re.compile(r"`([^`\n]+?)`")
 
 _STRIP_TAGS_RE = re.compile(r"</?(?:" + "|".join(_ALLOWED_TAGS) + r")>")
+_TAG_TOKEN_RE = re.compile(r"</?(?:" + "|".join(_ALLOWED_TAGS) + r")>")
 
 # Telegram's hard limit for a text message is 4096 characters; sending
 # anything longer fails outright. Leave headroom below that.
@@ -91,7 +92,23 @@ def to_telegram_html(text: str) -> str:
 
 
 def _tags_balanced(text: str) -> bool:
-    return all(text.count(f"<{tag}>") == text.count(f"</{tag}>") for tag in _ALLOWED_TAGS)
+    """True only for properly nested, fully closed tags.
+
+    Equal open/close *counts* per tag are not enough — Telegram also
+    rejects crossed nesting like "<b>x<i>y</b>z</i>" (counts balance, but
+    the closing order is wrong), so this walks the tags in order with a
+    stack rather than just tallying occurrences.
+    """
+    stack: list[str] = []
+    for token in _TAG_TOKEN_RE.findall(text):
+        if token.startswith("</"):
+            tag = token[2:-1]
+            if not stack or stack[-1] != tag:
+                return False
+            stack.pop()
+        else:
+            stack.append(token[1:-1])
+    return not stack
 
 
 def _strip_tags(text: str) -> str:

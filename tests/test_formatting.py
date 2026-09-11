@@ -76,6 +76,22 @@ def test_unbalanced_tag_degrades_to_plain_text_instead_of_breaking() -> None:
     assert "незакрытый тег" in result
 
 
+def test_crossed_nesting_degrades_to_plain_text() -> None:
+    """"<b>x<i>y</b>z</i>" has equal open/close counts per tag but invalid
+    (crossed) nesting order — Telegram would still reject this as malformed
+    HTML. A naive count-based balance check would wrongly call it fine.
+    """
+    result = to_telegram_html("Это <b>жирный <i>и курсив</b> текст</i> подряд.")
+    assert "<b>" not in result
+    assert "<i>" not in result
+    assert "жирный" in result and "курсив" in result
+
+
+def test_properly_nested_tags_are_preserved() -> None:
+    result = to_telegram_html("Это <b>жирный <i>и курсив</i> вместе</b>.")
+    assert result == "Это <b>жирный <i>и курсив</i> вместе</b>."
+
+
 def test_unbalanced_markdown_leaves_stray_marker_as_literal_text() -> None:
     """An unpaired ** (no closing **) simply never matches the bold regex,
     so it must remain as harmless literal text — not a parse error.

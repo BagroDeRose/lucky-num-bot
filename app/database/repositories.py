@@ -6,7 +6,10 @@ themselves, keeping persistence concerns out of business/UI logic.
 
 from __future__ import annotations
 
-from sqlalchemy import func, select
+from typing import cast
+
+from sqlalchemy import func, select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -171,13 +174,29 @@ async def get_latest_pending_payment(
 
 
 async def mark_payment_paid(session: AsyncSession, payment: Payment) -> bool:
-    """Transition a payment to PAID. Returns False (no-op) if it was already
-    PAID, guaranteeing idempotency against duplicate callbacks/retries.
+    """Transition a payment to PAID exactly once, even if two callers race on
+    the same payment (e.g. a rapid double-tap on "Я оплатил, проверить
+    статус", each dispatched as a separate update with its own session). A
+    Python-side "if not already PAID" check followed by a flush is not
+    atomic — both concurrent callers could read PENDING before either
+    commits, and both would then treat the transition as theirs, double-
+    logging payment_success and potentially double-delivering the report.
+    The UPDATE ... WHERE status != PAID below is a single atomic statement:
+    only the caller whose UPDATE actually matches the row (rowcount > 0) is
+    considered to have performed the transition.
     """
-    if payment.status == PaymentStatus.PAID:
+    result = cast(
+        CursorResult,
+        await session.execute(
+            update(Payment)
+            .where(Payment.id == payment.id, Payment.status != PaymentStatus.PAID)
+            .values(status=PaymentStatus.PAID)
+        ),
+    )
+    await session.flush()
+    if result.rowcount == 0:
         return False
     payment.status = PaymentStatus.PAID
-    await session.flush()
     return True
 
 

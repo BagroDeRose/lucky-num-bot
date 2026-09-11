@@ -3,6 +3,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import httpx
+import openai
 import pytest
 
 from app.ai import client as ai_client
@@ -69,6 +71,41 @@ async def test_generate_report_wraps_timeout(sample_result, monkeypatch) -> None
         raise TimeoutError("OpenAI request timed out")
 
     monkeypatch.setattr(report_generator, "complete_chat", timeout_complete_chat)
+
+    with pytest.raises(report_generator.ReportGenerationError):
+        await report_generator.generate_report(sample_result)
+
+
+_FAKE_REQUEST = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+
+
+@pytest.mark.parametrize(
+    "make_exc",
+    [
+        lambda: openai.AuthenticationError(
+            "Invalid API key", response=httpx.Response(401, request=_FAKE_REQUEST), body=None
+        ),
+        lambda: openai.RateLimitError(
+            "Rate limit exceeded", response=httpx.Response(429, request=_FAKE_REQUEST), body=None
+        ),
+        lambda: openai.APIConnectionError(request=_FAKE_REQUEST),
+        lambda: openai.APITimeoutError(request=_FAKE_REQUEST),
+    ],
+    ids=["auth_error", "rate_limit_error", "connection_error", "timeout_error"],
+)
+async def test_generate_report_wraps_real_openai_sdk_error_types(
+    sample_result, monkeypatch, make_exc
+) -> None:
+    """Uses the SDK's actual exception classes (not a generic RuntimeError
+    stand-in) to prove the failure path genuinely handles what the OpenAI
+    SDK raises for auth failures, rate limits, connection errors, and
+    timeouts — each has its own constructor shape, so a generic mock could
+    hide a crash (e.g. in error logging) that only a real instance exposes.
+    """
+    monkeypatch.setattr(settings, "openai_api_key", "test-key")
+    fake_client = AsyncMock()
+    fake_client.chat.completions.create = AsyncMock(side_effect=make_exc())
+    monkeypatch.setattr(ai_client, "get_openai_client", lambda: fake_client)
 
     with pytest.raises(report_generator.ReportGenerationError):
         await report_generator.generate_report(sample_result)
@@ -246,3 +283,18 @@ def test_complete_chat_max_completion_tokens_is_configured_reasonably() -> None:
 
     source = inspect.getsource(ai_client.complete_chat)
     assert "max_completion_tokens=1400" in source
+
+
+async def test_get_openai_client_configures_an_explicit_bounded_timeout(monkeypatch) -> None:
+    """Regression test: the SDK's own default (600s) would leave a user
+    waiting up to 10 minutes with zero feedback if a request ever hangs —
+    an explicit, bounded timeout is required so a stuck call fails fast
+    enough to trigger the existing retry path instead.
+    """
+    monkeypatch.setattr(settings, "openai_api_key", "test-key")
+    monkeypatch.setattr(ai_client, "_client", None)
+
+    client = ai_client.get_openai_client()
+
+    assert client.timeout == ai_client.OPENAI_REQUEST_TIMEOUT_SECONDS
+    assert client.timeout < 600  # meaningfully below the SDK default

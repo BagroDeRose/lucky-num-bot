@@ -19,6 +19,7 @@ from app.bot.keyboards.main import (
     after_report_kb,
     mock_payment_kb,
     retry_report_kb,
+    teaser_kb,
     yookassa_payment_kb,
 )
 from app.bot.utils import cb_answer, require_callback_data
@@ -203,7 +204,7 @@ async def cb_yookassa_check(callback: CallbackQuery, session: AsyncSession, user
         # yet, try again" on every tap.
         await repo.mark_payment_failed(session, pending)
         await session.commit()
-        await cb_answer(callback, texts.YOOKASSA_PAYMENT_CANCELED)
+        await cb_answer(callback, texts.YOOKASSA_PAYMENT_CANCELED, reply_markup=teaser_kb(analysis.id))
         return
 
     payment = await payment_service.confirm_payment(session, yookassa_payload)

@@ -95,7 +95,7 @@ scoring logic, SQL, or prompt text themselves.
   reports are cached so retries never re-trigger OpenAI calls.
 - Lightweight funnel-analytics event log + a CLI to summarize it.
 - `/history` with per-user, ownership-scoped access to past analyses.
-- Alembic migrations, async SQLAlchemy 2.x, pytest suite (170+ tests), ruff +
+- Alembic migrations, async SQLAlchemy 2.x, pytest suite (190+ tests), ruff +
   mypy clean.
 
 ## Requirements
@@ -181,7 +181,7 @@ closes the bot session).
 pytest
 ```
 
-170+ tests cover: input validation, deterministic scoring/pattern detection
+190+ tests cover: input validation, deterministic scoring/pattern detection
 and score bounds (including a regression test against digit-frequency
 double-counting), algorithm determinism, repository operations (including
 user-scoped access control and SQLite foreign-key enforcement), payment
@@ -193,8 +193,10 @@ and retry paths also tested), Telegram routing edge cases (e.g. a slash
 command while the FSM is mid-flow, or editing a message to identical
 content), callback-query handlers acknowledging promptly *before* any slow
 external call so Telegram never invalidates them, concurrent-write behavior
-against a real file-based SQLite database (WAL mode, busy_timeout, and a
-deterministic unique-constraint race), Telegram HTML sanitization (Markdown
+against a real file-based SQLite database (WAL mode, busy_timeout, a
+deterministic unique-constraint race, and a payment-confirmation race
+verifying `mark_payment_paid` transitions exactly once under concurrent
+callers), Telegram HTML sanitization (Markdown
 leakage, tag balancing, message-length truncation), and the AI-facing report
 payload (deterministic facts preserved and internal scoring mechanics never
 exposed), and a full free-to-paid integration flow.

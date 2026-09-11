@@ -98,7 +98,7 @@ def detect_patterns(digits: list[int], normalized_number: str) -> list[DetectedP
         patterns.append(
             DetectedPattern(
                 name=f"repeated_pair_{p}",
-                description=f"Пара «{p}» создаёт визуальный и символический акцент.",
+                description=f"Два одинаковых знака подряд — «{p}».",
             )
         )
 

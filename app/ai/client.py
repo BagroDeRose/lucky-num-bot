@@ -16,12 +16,24 @@ logger = get_logger(__name__)
 _client: AsyncOpenAI | None = None
 
 
+#  The SDK's own default (600s) is far too long for a bot the user is
+#  actively waiting on — a hung request would leave them staring at
+#  nothing for up to 10 minutes with no feedback. An explicit, bounded
+#  timeout means a stuck call fails predictably and quickly enough to
+#  trigger the existing graceful-degradation path (ReportGenerationError ->
+#  retry button) instead. 60s is generous for a genuine ~1500-2500
+#  character generation while still failing well before the user gives up.
+OPENAI_REQUEST_TIMEOUT_SECONDS = 60.0
+
+
 def get_openai_client() -> AsyncOpenAI:
     global _client
     if _client is None:
         if not settings.openai_configured:
             raise RuntimeError("OPENAI_API_KEY is not configured")
-        _client = AsyncOpenAI(api_key=settings.openai_api_key)
+        _client = AsyncOpenAI(
+            api_key=settings.openai_api_key, timeout=OPENAI_REQUEST_TIMEOUT_SECONDS
+        )
     return _client
 
 

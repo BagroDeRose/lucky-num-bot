@@ -25,10 +25,10 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 from sqlalchemy import event, text
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.database import repositories as repo
-from app.database.models import Base
+from app.database.models import Base, Payment
 from app.database.session import _configure_sqlite_connection
 
 
@@ -145,3 +145,58 @@ async def test_unique_provider_payment_id_still_enforced_under_concurrency(
 
     ids = await asyncio.gather(*(try_create() for _ in range(3)))
     assert len(set(ids)) == 1  # all three calls resolved to the same row
+
+
+async def test_concurrent_mark_payment_paid_transitions_exactly_once(file_engine) -> None:
+    """Regression test for a real race: two concurrent confirmations of the
+    same payment (e.g. a rapid double-tap on "Я оплатил, проверить статус",
+    each dispatched as its own update/session) must not both report having
+    performed the pending->paid transition — that would double-log
+    payment_success and risk double-delivering the paid report. Only one of
+    N concurrent callers may see transitioned=True.
+    """
+    from app.analysis.engine import analyze
+
+    session_factory = async_sessionmaker(file_engine, expire_on_commit=False)
+
+    async with session_factory() as setup_session:
+        user = await repo.get_or_create_user(setup_session, telegram_id=777, username="u")
+        await setup_session.flush()
+        analysis = await repo.create_analysis(setup_session, user_id=user.id, result=analyze("2200373"))
+        await setup_session.commit()
+        payment = await repo.create_pending_payment(
+            setup_session,
+            user_id=user.id,
+            analysis_id=analysis.id,
+            amount=99,
+            currency="RUB",
+            provider="mock",
+            provider_payment_id=f"race-{uuid.uuid4()}",
+        )
+        await setup_session.commit()
+        payment_id = payment.id
+
+    # Pre-load N independent sessions/rows, each still seeing PENDING, before
+    # any of them attempts the transition — this is what actually reproduces
+    # the race (two handlers that each already loaded the row, then racing
+    # to confirm), as opposed to loading-then-confirming one at a time,
+    # which lets SQLite's single-writer lock serialize the reads themselves
+    # and never exposes the bug.
+    loaded: list[tuple[AsyncSession, Payment]] = []
+    for _ in range(5):
+        session = session_factory()
+        row = await session.get(Payment, payment_id)
+        assert row is not None
+        loaded.append((session, row))
+
+    async def try_confirm(session: AsyncSession, row: Payment) -> bool:
+        try:
+            transitioned = await repo.mark_payment_paid(session, row)
+            await session.commit()
+            return transitioned
+        finally:
+            await session.close()
+
+    outcomes = await asyncio.gather(*(try_confirm(s, r) for s, r in loaded))
+    assert outcomes.count(True) == 1
+    assert outcomes.count(False) == 4

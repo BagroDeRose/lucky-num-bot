@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from app.analysis.engine import ValidationError, validate_serial_number
+from app.analysis.rules import MAX_SERIAL_LENGTH, MIN_SERIAL_LENGTH
 
 
 def test_valid_numeric_number() -> None:
@@ -51,6 +52,26 @@ def test_rejects_too_short() -> None:
 def test_rejects_too_long() -> None:
     with pytest.raises(ValidationError):
         validate_serial_number("1" * 25)
+
+
+def test_accepts_exactly_minimum_length() -> None:
+    number = "1" * MIN_SERIAL_LENGTH
+    assert validate_serial_number(number) == number
+
+
+def test_rejects_one_below_minimum_length() -> None:
+    with pytest.raises(ValidationError):
+        validate_serial_number("1" * (MIN_SERIAL_LENGTH - 1))
+
+
+def test_accepts_exactly_maximum_length() -> None:
+    number = "1" * MAX_SERIAL_LENGTH
+    assert validate_serial_number(number) == number
+
+
+def test_rejects_one_above_maximum_length() -> None:
+    with pytest.raises(ValidationError):
+        validate_serial_number("1" * (MAX_SERIAL_LENGTH + 1))
 
 
 def test_error_message_is_user_facing_russian_text() -> None:
