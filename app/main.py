@@ -7,6 +7,7 @@ import asyncio
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.types import BotCommand
 
 from app.bot.error_handler import register_error_handler
 from app.bot.handlers import build_root_router
@@ -33,6 +34,21 @@ async def run() -> None:
     bot = Bot(
         token=settings.bot_token,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+    )
+    # Populates Telegram's native "/" command menu so /start and /help (the
+    # bot's escape hatches out of any inline-keyboard flow) are always
+    # visible, not just mentioned in message text. Runs once per process
+    # startup — set_my_commands is a declarative "this is the current list"
+    # call, so calling it again on every restart is naturally idempotent,
+    # not additive.
+    await bot.set_my_commands(
+        [
+            BotCommand(command="start", description="Начать заново"),
+            BotCommand(command="analyze", description="Проверить купюру"),
+            BotCommand(command="history", description="Прошлые разборы"),
+            BotCommand(command="about", description="О проекте"),
+            BotCommand(command="help", description="Помощь"),
+        ]
     )
     dispatcher = Dispatcher()
     dispatcher.update.middleware(DbSessionMiddleware())

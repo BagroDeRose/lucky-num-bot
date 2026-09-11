@@ -230,6 +230,7 @@ See [`.env.example`](.env.example) for the full list. Summary:
 | `BOT_TOKEN` | **Yes** | From @BotFather. Bot will not start without it. |
 | `OPENAI_API_KEY` | For paid reports | Without it, paid reports fail gracefully with a retry option; teaser and payment flow still work. |
 | `OPENAI_MODEL` | No | Defaults to `gpt-3.5-turbo`. |
+| `AI_MAX_GENERATION_ATTEMPTS_PER_ANALYSIS` | No | Defaults to `5`. Caps real OpenAI attempts (successes + failures) per *paid* analysis — bounds worst-case AI spend if generation keeps failing and the user keeps tapping "Попробовать ещё раз" on the same already-paid analysis. |
 | `PAYMENT_PROVIDER` | No | `mock` (default, local testing), `telegram`, or `yookassa`. |
 | `PAYMENT_TOKEN` | If `PAYMENT_PROVIDER=telegram` | Native Telegram Payments provider token from BotFather → Payments. Unrelated to YooKassa. |
 | `YOOKASSA_SHOP_ID` | If `PAYMENT_PROVIDER=yookassa` | YooKassa shop (merchant) ID — the *shop* credential pair that actually charges the user. |
@@ -311,6 +312,28 @@ DB schema) is provider-agnostic and would not need to change.
   is preferred over a retry prompt) falls back to a plain deterministic
   report template (`interpreter.render_fallback_full_report`) that mirrors
   the same section structure without the AI's richer prose.
+
+### Financial safety
+
+- Every OpenAI call requires `analysis.paid=True` (see every call site into
+  `_deliver_report` in `app/bot/handlers/payment.py`) — routine AI volume is
+  inherently gated by real payment revenue, not something the app needs to
+  separately throttle.
+- Exactly one OpenAI completion is ever made per successful report: an
+  in-process, per-analysis `asyncio.Lock` prevents concurrent duplicate
+  generation, and an already-generated report (`analysis.report`) is always
+  reused instead of regenerating — including after a process restart, since
+  that check is DB-persisted, not dependent on any in-memory state.
+- A failed generation never auto-retries; the user must explicitly tap
+  "Попробовать ещё раз". `AI_MAX_GENERATION_ATTEMPTS_PER_ANALYSIS` (default
+  `5`) caps how many real attempts (successes + failures) can be made on one
+  *already-paid* analysis, bounding worst-case AI spend on any single
+  analysis to a small, predictable multiple of one report's cost — the one
+  previously uncapped vector, since nothing else limited repeated retries
+  after a persistent failure.
+- Project-wide OpenAI spending caps/alerts (a hard ceiling on total monthly
+  usage) are **not** configurable from this repository — that must be set
+  in the OpenAI platform's own usage limits, not the application.
 
 ## Security notes
 

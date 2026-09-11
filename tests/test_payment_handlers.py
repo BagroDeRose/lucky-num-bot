@@ -504,3 +504,58 @@ async def test_report_reuse_does_not_depend_on_in_memory_lock_surviving(
 
     assert call_count["n"] == 1, "a second delivery must not call OpenAI again"
     assert sent == ["Стабильный отчёт.", "Стабильный отчёт."]
+
+
+async def test_generation_attempt_limit_stops_further_openai_calls_after_repeated_failures(
+    session: AsyncSession, monkeypatch
+) -> None:
+    """Financial safety regression test: previously, nothing stopped a user
+    from tapping "Попробовать ещё раз" indefinitely on one already-paid
+    analysis, and every tap was a real, billed OpenAI attempt. With
+    AI_MAX_GENERATION_ATTEMPTS_PER_ANALYSIS set to 2, three delivery
+    attempts against a persistently-failing model must make at most 2 real
+    OpenAI calls — the third must be refused locally, with a friendly
+    message and a way back to the main menu, never reaching complete_chat.
+    """
+    from app.ai import report_generator
+
+    monkeypatch.setattr(payment_module.settings, "openai_api_key", "test-key")
+    monkeypatch.setattr(payment_module.settings, "ai_max_generation_attempts_per_analysis", 2)
+    # Isolate the module-level attempt counter for this test — it is a
+    # process-wide dict shared across the whole test run, keyed by
+    # analysis_id, and different tests' in-memory SQLite databases can
+    # coincidentally reuse the same autoincrement id.
+    monkeypatch.setattr(payment_module, "_report_generation_attempts", {})
+
+    call_count = {"n": 0}
+
+    async def always_failing_complete_chat(system_prompt: str, user_prompt: str) -> str:
+        call_count["n"] += 1
+        raise RuntimeError("persistent upstream failure")
+
+    monkeypatch.setattr(report_generator, "complete_chat", always_failing_complete_chat)
+
+    user = await repo.get_or_create_user(session, telegram_id=950, username="u")
+    await session.flush()
+    result = analyze("2200373")
+    analysis = await repo.create_analysis(session, user_id=user.id, result=result)
+    await repo.mark_analysis_paid(session, analysis)
+    await session.commit()
+
+    sent: list[tuple[str, object]] = []
+
+    async def send(text: str, kb: object) -> None:
+        sent.append((text, kb))
+
+    for _ in range(3):
+        await payment_module._deliver_report(send, session, analysis, user)
+
+    assert call_count["n"] == 2, "must not exceed the configured attempt limit"
+    assert sent[0][0] == texts.REPORT_GENERATION_FAILED
+    assert sent[1][0] == texts.REPORT_GENERATION_FAILED
+    assert sent[2][0] == texts.REPORT_GENERATION_LIMIT_REACHED
+
+    # The final refusal must still leave the user with a way back, not a dead end.
+    from app.bot.keyboards.main import back_to_start_kb
+
+    assert sent[2][1] == back_to_start_kb()

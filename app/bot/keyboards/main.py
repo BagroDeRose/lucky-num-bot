@@ -83,7 +83,22 @@ def retry_report_kb(analysis_id: int) -> InlineKeyboardMarkup:
                     text="🔄 Попробовать ещё раз",
                     callback_data=f"retry_report:{analysis_id}",
                 )
-            ]
+            ],
+            [InlineKeyboardButton(text="🏠 В начало", callback_data="main_menu")],
+        ]
+    )
+
+
+def back_to_start_kb() -> InlineKeyboardMarkup:
+    """A single, minimal escape hatch — used where the current state has no
+    other meaningful action (e.g. the generation-attempt safety limit was
+    hit) rather than the full main_menu_kb, to avoid suggesting actions
+    ("Проверить купюру" would start an unrelated new analysis) that don't
+    fit that moment.
+    """
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🏠 В начало", callback_data="main_menu")],
         ]
     )
 

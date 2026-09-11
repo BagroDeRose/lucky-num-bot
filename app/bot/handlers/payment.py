@@ -18,6 +18,7 @@ from app.analysis.models import AnalysisResult
 from app.bot import texts
 from app.bot.keyboards.main import (
     after_report_kb,
+    back_to_start_kb,
     mock_payment_kb,
     retry_report_kb,
     teaser_kb,
@@ -61,6 +62,20 @@ def _lock_for_analysis(analysis_id: int) -> asyncio.Lock:
     return lock
 
 
+# Financial safety: every OpenAI call already requires analysis.paid=True
+# (see every call site below), so routine volume is inherently gated by real
+# revenue. The one previously uncapped vector was this exact retry button:
+# nothing stopped a user from re-triggering a real, billed OpenAI attempt on
+# one already-paid analysis indefinitely after repeated failures. This
+# counts real generation attempts (successes and failures alike) per
+# analysis_id and refuses further attempts past
+# settings.ai_max_generation_attempts_per_analysis, bounding worst-case AI
+# spend on any one analysis to a small, predictable multiple of one report's
+# cost. In-memory like the lock above (same process-lifetime tradeoff,
+# reset only by a restart, which a user cannot trigger).
+_report_generation_attempts: dict[int, int] = {}
+
+
 def _message_sender(message: Message) -> Sender:
     async def send(text: str, kb: InlineKeyboardMarkup | None) -> None:
         await message.answer(text, reply_markup=kb)
@@ -93,6 +108,17 @@ async def _deliver_report(send: Sender, session: AsyncSession, analysis: Analysi
         if analysis.report:
             await send(analysis.report, after_report_kb())
             return
+
+        attempts = _report_generation_attempts.get(analysis.id, 0)
+        if attempts >= settings.ai_max_generation_attempts_per_analysis:
+            logger.warning(
+                "Report generation attempt limit reached for analysis %s (%d attempts)",
+                analysis.id,
+                attempts,
+            )
+            await send(texts.REPORT_GENERATION_LIMIT_REACHED, back_to_start_kb())
+            return
+        _report_generation_attempts[analysis.id] = attempts + 1
 
         await repo.log_event(session, user.id, "report_generation_started", {"analysis_id": analysis.id})
         await session.commit()
