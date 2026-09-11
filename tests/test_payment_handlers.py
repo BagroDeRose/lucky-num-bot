@@ -272,6 +272,46 @@ async def test_get_report_shows_friendly_error_when_payment_creation_fails(
     assert pending is None
 
 
+async def test_get_report_recovers_a_paid_analysis_with_no_report_yet(
+    session: AsyncSession, monkeypatch
+) -> None:
+    """Covers "bot restart/crash between payment confirmation and report
+    delivery": the user's only recourse is re-tapping the same "Открыть
+    полный разбор" button they already have in their chat history, which
+    routes through this exact handler. An analysis that is already paid but
+    has no report (analysis.paid=True, analysis.report=None — exactly what
+    persists if the process died right after marking payment paid and
+    before/while generating) must not be treated as "needs a new payment" —
+    it must go straight to report generation.
+    """
+    user = await repo.get_or_create_user(session, telegram_id=406, username="u")
+    await session.flush()
+    result = analyze("2200373")
+    analysis = await repo.create_analysis(session, user_id=user.id, result=result)
+    await repo.mark_analysis_paid(session, analysis)
+    await session.commit()
+
+    monkeypatch.setattr(payment_module.settings, "openai_api_key", "test-key")
+
+    from app.ai import report_generator
+
+    async def fake_complete_chat(system_prompt: str, user_prompt: str) -> str:
+        return "Восстановленный отчёт."
+
+    monkeypatch.setattr(report_generator, "complete_chat", fake_complete_chat)
+
+    callback = _make_callback(f"get_report:{analysis.id}")
+    await cb_get_report(callback, session, user)
+
+    sent_texts = [c.args[1] for c in callback.bot.send_message.await_args_list]
+    assert "Восстановленный отчёт." in sent_texts
+
+    # No new payment was created — the existing paid state was honored, not re-charged.
+    assert await repo.get_latest_pending_payment(session, analysis.id, user.id) is None
+    await session.refresh(analysis)
+    assert analysis.report == "Восстановленный отчёт."
+
+
 async def test_get_report_acknowledges_callback_before_slow_yookassa_call(
     session: AsyncSession, monkeypatch
 ) -> None:
@@ -411,3 +451,56 @@ async def test_get_report_handles_timeout_without_leaving_stale_payment(
     pending = await repo.get_latest_pending_payment(session, analysis.id, user.id)
     assert pending is not None
     assert pending.provider_payment_id == "yk-408-retry"
+
+
+async def test_report_reuse_does_not_depend_on_in_memory_lock_surviving(
+    session: AsyncSession, monkeypatch
+) -> None:
+    """The per-analysis asyncio.Lock in app.bot.handlers.payment only exists
+    to serialize *simultaneous, in-process* delivery attempts — it is not
+    what makes report reuse correct. That guarantee comes entirely from the
+    DB-persisted analysis.report column. A real bot restart wipes all
+    in-memory state (the lock dict included) automatically; this test
+    proxies that by clearing the lock dict explicitly between two delivery
+    attempts and proves the second attempt still reuses the stored report
+    with zero additional OpenAI calls, rather than accidentally depending on
+    a lock object surviving.
+    """
+    from app.ai import report_generator
+
+    monkeypatch.setattr(payment_module.settings, "openai_api_key", "test-key")
+
+    call_count = {"n": 0}
+
+    async def fake_complete_chat(system_prompt: str, user_prompt: str) -> str:
+        call_count["n"] += 1
+        return "Стабильный отчёт."
+
+    monkeypatch.setattr(report_generator, "complete_chat", fake_complete_chat)
+
+    user = await repo.get_or_create_user(session, telegram_id=999, username="u")
+    await session.flush()
+    result = analyze("2200373")
+    analysis = await repo.create_analysis(session, user_id=user.id, result=result)
+    await repo.mark_analysis_paid(session, analysis)
+    await session.commit()
+
+    sent: list[str] = []
+
+    async def send(text: str, kb: object) -> None:
+        sent.append(text)
+
+    # 1. Generate + 2. save the report for real (no cache yet).
+    await payment_module._deliver_report(send, session, analysis, user)
+    assert call_count["n"] == 1
+    assert sent == ["Стабильный отчёт."]
+
+    # 3. Release process-level state — the restart proxy.
+    payment_module._report_generation_locks.clear()
+
+    # 4. Request the report again.
+    await session.refresh(analysis)
+    await payment_module._deliver_report(send, session, analysis, user)
+
+    assert call_count["n"] == 1, "a second delivery must not call OpenAI again"
+    assert sent == ["Стабильный отчёт.", "Стабильный отчёт."]
