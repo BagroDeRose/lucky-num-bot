@@ -14,7 +14,9 @@ from app.analysis.rules import (
     DIGIT_MEANINGS,
     OVERALL_MAX,
     OVERALL_MIN,
+    PERSONAL_RESONANCE_CAP,
     REPEATED_DIGIT_THRESHOLD,
+    RESONANCE_BONUS,
     SCORE_CATEGORIES,
     SCORE_MAX,
     SCORE_MIN,
@@ -129,15 +131,35 @@ def _dominant_categories(digit: int) -> list[str]:
     return [cat for cat, value in zip(SCORE_CATEGORIES, profile, strict=True) if value == top]
 
 
+def classify_resonance(reduced_number: int, freq: dict[int, int], birth_number: int) -> str:
+    """How a banknote relates to one person, using only checkable facts.
+
+    "same_number" — the serial reduces to the same digit as the birth date;
+    "present"     — the life-path digit literally occurs in the serial;
+    "absent"      — it does not. See app.analysis.rules for the full rule.
+    """
+    if reduced_number == birth_number:
+        return "same_number"
+    if birth_number in freq:
+        return "present"
+    return "absent"
+
+
 def compute_scores(
     reduced_number: int,
     freq: dict[int, int],
     repeated_pairs: list[str],
     patterns: list[DetectedPattern],
+    birth_number: int | None = None,
 ) -> tuple[int, int, int, int, int, ScoreBreakdown]:
     """Returns (money, luck, growth, stability, overall, breakdown).
 
     See the module docstring in app.analysis.rules for the full formula.
+
+    `birth_number` is optional: passing None reproduces the original
+    serial-only scoring exactly, which is what keeps every analysis created
+    before the birth-date feature (and every user who declines to share a
+    date) scoring identically.
     """
 
     scores = dict(zip(SCORE_CATEGORIES, BASE_DIGIT_PROFILE[reduced_number], strict=True))
@@ -245,6 +267,35 @@ def compute_scores(
             "descending_sequence",
             "Плавный спад ассоциируется с контролем и порядком.",
         )
+
+    # Personalization: a small, bounded adjustment for how this particular
+    # banknote lines up with this particular person's life-path digit. Skipped
+    # entirely when no birth date is known, so serial-only analyses keep their
+    # exact historical scores. Applied to the birth digit's own dominant
+    # category/ies via the same lookup the digit-emphasis bonus uses, and
+    # capped below that bonus so it can never dominate the banknote's reading.
+    if birth_number is not None:
+        resonance = classify_resonance(reduced_number, freq, birth_number)
+        bonus = min(RESONANCE_BONUS[resonance], PERSONAL_RESONANCE_CAP)
+        categories = _dominant_categories(birth_number)
+        if bonus > 0 and len(categories) != len(SCORE_CATEGORIES):
+            for category in categories:
+                add(
+                    category,
+                    bonus,
+                    f"birth_resonance_{resonance}",
+                    (
+                        f"Число рождения {birth_number} "
+                        f"({DIGIT_MEANINGS[birth_number]}) совпадает с главным "
+                        "числом купюры."
+                        if resonance == "same_number"
+                        else (
+                            f"Число рождения {birth_number} "
+                            f"({DIGIT_MEANINGS[birth_number]}) встречается "
+                            "среди цифр номера."
+                        )
+                    ),
+                )
 
     for category in SCORE_CATEGORIES:
         scores[category] = _clamp(scores[category], SCORE_MIN, SCORE_MAX)

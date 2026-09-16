@@ -6,9 +6,13 @@ output, always. No randomness, no network calls, no AI.
 
 from __future__ import annotations
 
+import datetime as dt
+
+from app.analysis.birth import birth_number, birth_number_meaning
 from app.analysis.models import AnalysisResult
 from app.analysis.rules import ALGORITHM_VERSION, MAX_SERIAL_LENGTH, MIN_SERIAL_LENGTH
 from app.analysis.scoring import (
+    classify_resonance,
     compute_scores,
     detect_patterns,
     digit_frequency,
@@ -73,10 +77,17 @@ def reduce_to_single_digit(n: int) -> int:
     return n
 
 
-def analyze(raw_number: str) -> AnalysisResult:
+def analyze(raw_number: str, birth_date: dt.date | None = None) -> AnalysisResult:
     """Run the full deterministic analysis pipeline on a raw user input string.
 
     Raises ValidationError if the input is not a valid serial number.
+
+    `birth_date` is optional personalization. Passing None produces exactly
+    the same result the engine has always produced for that serial number,
+    which is what keeps pre-existing analyses and users who decline to share
+    a date fully supported. Passing a date adds the deterministic life-path
+    layer documented in app.analysis.rules — same date + same serial always
+    yields the same result, with no randomness and no AI involvement.
     """
     normalized = validate_serial_number(raw_number)
     digits = [int(c) for c in normalized]
@@ -89,11 +100,14 @@ def analyze(raw_number: str) -> AnalysisResult:
     repeated_pairs = find_repeated_pairs(digits)
     patterns = detect_patterns(digits, normalized)
 
+    personal_number = birth_number(birth_date) if birth_date is not None else None
+
     money, luck, growth, stability, overall, breakdown = compute_scores(
         reduced_number=reduced_number,
         freq=freq,
         repeated_pairs=repeated_pairs,
         patterns=patterns,
+        birth_number=personal_number,
     )
 
     return AnalysisResult(
@@ -106,6 +120,18 @@ def analyze(raw_number: str) -> AnalysisResult:
         repeated_digits=repeated_digits,
         repeated_pairs=repeated_pairs,
         detected_patterns=patterns,
+        birth_number=personal_number,
+        birth_number_meaning=(
+            birth_number_meaning(personal_number) if personal_number is not None else None
+        ),
+        birth_resonance=(
+            classify_resonance(reduced_number, freq, personal_number)
+            if personal_number is not None
+            else None
+        ),
+        birth_digit_in_serial_count=(
+            freq.get(personal_number, 0) if personal_number is not None else 0
+        ),
         money_score=money,
         luck_score=luck,
         growth_score=growth,

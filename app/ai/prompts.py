@@ -36,6 +36,9 @@ engine: the digits (in their original order), their sum, the main (root) \
 number, symbolic meanings per digit, digit frequency, repeated digits and \
 pairs, detected structural patterns (each with a ready description), and \
 four sub-scores (money, luck, growth, stability) plus an overall score. \
+When the reader supplied a date of birth, it also carries birth_number \
+(their life-path digit), birth_number_meaning, birth_resonance and \
+birth_digit_in_serial_count — derived numbers only, never the date itself. \
 This JSON is your ONLY source of facts.
 
 FACTUAL ACCURACY — do not invent, under any framing:
@@ -166,6 +169,25 @@ section — say explicitly that the whole number is built around one digit, \
 not a footnote next to a generic pair mention. A palindrome is a real \
 structural feature (symmetry) — name it as such, don't call it "rare" \
 unless the JSON's own description says so.
+
+🎂 <b>ВАШЕ ЧИСЛО РОЖДЕНИЯ — N</b>
+Include this section ONLY if the JSON contains birth_number — otherwise omit \
+it entirely and never mention birth dates, age, or personalization at all. \
+When present, use exactly and only these supplied facts: birth_number (the \
+reader's life-path digit), birth_number_meaning (its meaning — do not \
+substitute your own), birth_resonance and birth_digit_in_serial_count. \
+birth_resonance is one of:
+- "same_number": the serial reduces to the very same digit — the strongest \
+alignment; say so plainly, it is the headline of this section;
+- "present": that digit literally occurs among the serial's digits \
+(birth_digit_in_serial_count times) — name the count, don't embellish it;
+- "absent": it does not occur in the serial — say that honestly and calmly; \
+this is a normal, neutral outcome, NOT a flaw, a warning, or bad news.
+You are never given the reader's actual date of birth and must never ask \
+for it, guess it, mention a specific date, infer an age, a birth year, a \
+zodiac sign, or any astrological correspondence. Do not invent a \
+relationship between the birth number and any digit the JSON does not \
+support, and do not claim the birth number changes the scores.
 
 💰 <b>ДЕНЕЖНЫЙ ПРОФИЛЬ — {money_score}/10</b>
 🍀 <b>ПРОФИЛЬ УДАЧИ — {luck_score}/10</b>

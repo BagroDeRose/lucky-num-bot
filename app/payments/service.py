@@ -6,6 +6,8 @@ when a payment is considered paid and an analysis unlocked.
 
 from __future__ import annotations
 
+import asyncio
+
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -15,6 +17,28 @@ from app.logging import get_logger
 from app.payments.provider import PaymentIntent, get_payment_provider
 
 logger = get_logger(__name__)
+
+# Serializes the "reuse an existing pending payment, else create one" decision
+# per analysis. That decision is a check-then-act: two concurrent taps on
+# "Открыть полный разбор" can both see "no pending payment" and both call
+# provider.create_payment(), which mints a *fresh* provider_payment_id each
+# time — so the unique constraint cannot catch it, and the shop ends up with
+# two real YooKassa payments for one analysis (one of them untracked by us,
+# which would take a paying user's money without unlocking anything).
+# Demonstrated with a concurrency regression test; under SQLite the write
+# lock happens to hide it, but that is an accident of the storage engine and
+# would disappear on PostgreSQL (the documented production target).
+# In-memory like the report-generation lock in app.bot.handlers.payment —
+# the bot runs as a single long-polling process (see README "Deployment").
+_payment_creation_locks: dict[int, asyncio.Lock] = {}
+
+
+def _lock_for_analysis(analysis_id: int) -> asyncio.Lock:
+    lock = _payment_creation_locks.get(analysis_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _payment_creation_locks[analysis_id] = lock
+    return lock
 
 
 class PaymentService:
@@ -32,16 +56,37 @@ class PaymentService:
         tapping "get full report" before paying would pile up an unbounded
         number of orphaned pending Payment rows, one per tap.
         """
+        async with _lock_for_analysis(analysis.id):
+            return await self._start_payment_locked(
+                session, user_id=user_id, analysis=analysis
+            )
+
+    async def _start_payment_locked(
+        self, session: AsyncSession, *, user_id: int, analysis: Analysis
+    ) -> tuple[Payment, PaymentIntent]:
         description = f"LuckyNum: полный отчёт по номеру {analysis.number}"
 
         existing = await repo.get_latest_pending_payment(session, analysis.id, user_id)
         if existing is not None:
+            # The reused row carries no confirmation URL: PaymentIntent.extra
+            # is in-memory only and is never persisted, so the URL minted when
+            # this payment was first created is long gone. Ask the provider to
+            # re-read it (a read-only lookup — see confirmation_url_for), which
+            # keeps this an actual *reuse* instead of minting a second payment
+            # for the same analysis. Recovery is best-effort: when it returns
+            # None the caller presents a recovery path rather than paying twice.
+            extra: dict = {"payload": existing.provider_payment_id}
+            recovered_url = await self.provider.confirmation_url_for(
+                existing.provider_payment_id
+            )
+            if recovered_url:
+                extra["confirmation_url"] = recovered_url
             intent = PaymentIntent(
                 provider_payment_id=existing.provider_payment_id,
                 amount=existing.amount,
                 currency=existing.currency,
                 description=description,
-                extra={"payload": existing.provider_payment_id},
+                extra=extra,
             )
             return existing, intent
 
@@ -59,6 +104,14 @@ class PaymentService:
             provider=self.provider.name,
             provider_payment_id=intent.provider_payment_id,
         )
+        # Commit before releasing the per-analysis lock. The payment now
+        # exists at the provider, so it must be durably recorded here: a
+        # later failure rolling this row back would strand a real, payable
+        # YooKassa payment that we no longer recognise (a user paying it
+        # would get nothing). Committing inside the lock is also what makes
+        # the next concurrent caller actually *see* this pending payment and
+        # reuse it instead of minting a second one.
+        await session.commit()
         return payment, intent
 
     async def confirm_payment(

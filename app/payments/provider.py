@@ -84,6 +84,23 @@ class PaymentProvider(ABC):
         or mock button click) into a PaymentCallbackResult.
         """
 
+    async def confirmation_url_for(self, provider_payment_id: str) -> str | None:
+        """Recover the URL the user must open to finish an *already created*
+        payment, without creating a new one.
+
+        Needed because PaymentIntent.extra is in-memory only (the payments
+        table has no column for it — see app.database.models.Payment), so a
+        confirmation URL is lost the moment the request that created the
+        payment ends. When a pending payment is later reused, the URL has to
+        be fetched back from the provider rather than re-minted.
+
+        Returns None when the provider has no such concept (Mock button,
+        Telegram invoice) or when the URL genuinely cannot be recovered
+        (payment already in a terminal state, provider unreachable).
+        Implementations MUST NOT create a payment here.
+        """
+        return None
+
 
 class MockPaymentProvider(PaymentProvider):
     """Local/dev provider: "payment" succeeds immediately when the user taps
@@ -325,6 +342,26 @@ class YooKassaPaymentProvider(PaymentProvider):
     async def verify_payment(self, provider_payment_id: str) -> bool:
         data = await self.check_status(provider_payment_id)
         return data.get("status") == "succeeded" and bool(data.get("paid"))
+
+    async def confirmation_url_for(self, provider_payment_id: str) -> str | None:
+        """Re-read an existing payment's confirmation URL via GET
+        /payments/{id} — a read-only lookup that never creates a payment, so
+        reusing a pending payment can never double-charge.
+
+        YooKassa only returns a `confirmation.confirmation_url` while the
+        payment is still awaiting the user; for a succeeded/canceled payment
+        the block is absent, which correctly yields None (there is nothing
+        left to pay). A provider/network failure also yields None rather than
+        raising, so the caller can fall back to an honest "link unavailable"
+        path instead of failing the whole interaction.
+        """
+        try:
+            data = await self.check_status(provider_payment_id)
+        except Exception:  # noqa: BLE001 - recovery is best-effort by contract
+            logger.warning("Could not re-read YooKassa payment to recover its confirmation URL")
+            return None
+        url = data.get("confirmation", {}).get("confirmation_url")
+        return url or None
 
     def parse_callback(self, payload: dict) -> PaymentCallbackResult:
         """`payload` is a YooKassa Payment object (from check_status(), or a

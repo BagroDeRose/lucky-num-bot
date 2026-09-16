@@ -6,6 +6,7 @@ themselves, keeping persistence concerns out of business/UI logic.
 
 from __future__ import annotations
 
+import datetime as dt
 from typing import cast
 
 from sqlalchemy import func, select, update
@@ -52,6 +53,16 @@ async def get_or_create_user(
             return user
         raise
     return user
+
+
+async def set_user_birth_date(session: AsyncSession, user: User, birth_date: dt.date) -> None:
+    """Remember a user's birth date so it is asked once, not per banknote.
+
+    Overwriting it never rewrites past analyses: each analysis stores the
+    derived numbers it was computed with in its own payload.
+    """
+    user.birth_date = birth_date
+    await session.flush()
 
 
 async def create_analysis(session: AsyncSession, user_id: int, result: AnalysisResult) -> Analysis:

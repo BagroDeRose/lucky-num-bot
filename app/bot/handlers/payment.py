@@ -20,6 +20,7 @@ from app.bot.keyboards.main import (
     after_report_kb,
     back_to_start_kb,
     mock_payment_kb,
+    payment_recheck_kb,
     retry_report_kb,
     teaser_kb,
     yookassa_payment_kb,
@@ -199,13 +200,31 @@ async def cb_get_report(callback: CallbackQuery, session: AsyncSession, user: Us
             prices=[LabeledPrice(label="Полный отчёт", amount=intent.amount * 100)],
         )
     elif settings.payment_provider == "yookassa":
-        await cb_answer(
-            callback,
-            texts.payment_intro_text(),
-            reply_markup=yookassa_payment_kb(
-                analysis.id, intent.amount, intent.currency, intent.extra["confirmation_url"]
-            ),
-        )
+        # Absent (reused payment whose URL could not be re-read) or empty
+        # (YooKassa omitted the confirmation block) are the same situation
+        # here: there is no link to hand over. Telegram also rejects a URL
+        # button with an empty href, so both must take the recovery path.
+        # The existing payment row is deliberately left untouched — see
+        # payment_recheck_kb for why no second payment is offered.
+        confirmation_url = intent.extra.get("confirmation_url")
+        if confirmation_url:
+            await cb_answer(
+                callback,
+                texts.payment_intro_text(),
+                reply_markup=yookassa_payment_kb(
+                    analysis.id, intent.amount, intent.currency, confirmation_url
+                ),
+            )
+        else:
+            logger.warning(
+                "No confirmation URL available for analysis %s; offering status re-check",
+                analysis.id,
+            )
+            await cb_answer(
+                callback,
+                texts.PAYMENT_LINK_UNAVAILABLE,
+                reply_markup=payment_recheck_kb(analysis.id),
+            )
     else:
         await cb_answer(
             callback,

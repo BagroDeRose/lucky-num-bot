@@ -45,6 +45,7 @@ async def run() -> None:
         [
             BotCommand(command="start", description="Начать заново"),
             BotCommand(command="analyze", description="Проверить купюру"),
+            BotCommand(command="birthdate", description="Дата рождения"),
             BotCommand(command="history", description="Прошлые разборы"),
             BotCommand(command="about", description="О проекте"),
             BotCommand(command="help", description="Помощь"),

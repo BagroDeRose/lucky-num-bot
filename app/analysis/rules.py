@@ -86,3 +86,49 @@ SCORE_CATEGORIES = ("money", "luck", "growth", "stability")
 
 # Cap on the digit-emphasis scoring bonus (see module docstring, point 2).
 DIGIT_EMPHASIS_CAP = 3
+
+# --- Date-of-birth personalization -------------------------------------
+#
+# OPTIONAL layer. An analysis without a birth date is scored exactly as
+# before — every rule below contributes nothing when birth_number is None,
+# so historical serial-only results stay reproducible byte-for-byte.
+#
+# THE CALCULATION, STATED PLAINLY
+#
+# 1. birth_number ("life path") — take the birth date's digits in the order
+#    DD MM YYYY, sum them, and reduce that sum to a single digit with the
+#    SAME reduction the serial number already uses
+#    (app.analysis.engine.reduce_to_single_digit). No new arithmetic is
+#    introduced: 07.03.1990 -> 0+7+0+3+1+9+9+0 = 29 -> 2+9 = 11 -> 1+1 = 2.
+#    Its symbolic meaning is read from DIGIT_MEANINGS above — the same table
+#    the serial's own digits use, so nothing is invented for birth dates.
+#
+# 2. resonance — how the banknote relates to this particular person. Only
+#    objectively checkable relations are used, never a vibe:
+#      "same_number" — the serial's reduced_number equals birth_number;
+#      "present"     — birth_number literally occurs among the serial digits;
+#      "absent"      — it does not occur.
+#
+# 3. the bonus — resonance adds a small, bounded amount to the birth digit's
+#    own dominant category/categories, looked up from BASE_DIGIT_PROFILE by
+#    exactly the same "which category does this digit score highest in" rule
+#    the digit-emphasis bonus already uses. Digit 0 is tied across all four
+#    categories and therefore grants no bonus, mirroring the existing
+#    exclusion for undirected digits — that guard is defensive only, since
+#    any accepted year contributes a nonzero digit and the life path is
+#    therefore always 1..9 (pinned by a test).
+#
+# The bonus is deliberately capped at +2 — smaller than DIGIT_EMPHASIS_CAP
+# (3) and well below a digit's base profile (up to 6) — so personalization
+# adjusts the reading without ever dominating what the banknote itself says.
+PERSONAL_RESONANCE_CAP = 2
+RESONANCE_BONUS: dict[str, int] = {
+    "same_number": 2,
+    "present": 1,
+    "absent": 0,
+}
+
+# Accepted birth years. The lower bound is a sanity floor rather than a
+# claim about users; the upper bound is "not in the future", enforced
+# against the current date at validation time.
+MIN_BIRTH_YEAR = 1900

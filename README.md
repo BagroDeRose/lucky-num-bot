@@ -25,16 +25,20 @@ AI-narrated personalized report.
 
 1. `/start` — bot introduces itself.
 2. User sends a serial number (digits only, leading zeros preserved).
-3. A **deterministic** Python analysis engine computes digit sums, patterns,
+3. The bot asks once for a date of birth (skippable). It is remembered on the
+   user, so later banknotes reuse it without asking again.
+4. A **deterministic** Python analysis engine computes digit sums, patterns,
    and four bounded sub-scores (money / luck / growth / stability) plus an
-   overall 0–100 score, with a full explainable breakdown.
-4. The bot shows a **free teaser** — interesting, but deliberately partial.
-5. User taps "Открыть полный разбор" and pays (mock provider locally, real
+   overall 0–100 score, with a full explainable breakdown. With a birth date
+   it also derives the life-path digit and how it meets the serial — see
+   "Date-of-birth personalization" below.
+5. The bot shows a **free teaser** — interesting, but deliberately partial.
+6. User taps "Открыть полный разбор" and pays (mock provider locally, real
    Telegram Payments, or YooKassa, depending on configuration).
-6. On confirmed payment, the structured analysis is handed to OpenAI, which
+7. On confirmed payment, the structured analysis is handed to OpenAI, which
    narrates it into a polished report — **the AI never computes anything**,
    it only writes prose around numbers that already exist.
-7. The report is cached on the analysis row, so retries/duplicate taps never
+8. The report is cached on the analysis row, so retries/duplicate taps never
    trigger a second OpenAI call or a second charge.
 
 ## Architecture
@@ -55,6 +59,7 @@ app/
 │
 ├── analysis/              # deterministic business logic (pure functions)
 │   ├── engine.py           # validate_serial_number(), analyze()
+│   ├── birth.py             # birth-date validation + derived life-path facts
 │   ├── rules.py             # the numerology "rule book" (entertainment)
 │   ├── scoring.py           # pattern detection + bounded scoring
 │   ├── models.py             # AnalysisResult, ScoreBreakdown (pydantic)
@@ -84,6 +89,8 @@ scoring logic, SQL, or prompt text themselves.
 
 - Deterministic, versioned numerology analysis engine (`ALGORITHM_VERSION`)
   with a fully explainable score breakdown.
+- Optional date-of-birth personalization (see below) — deterministic,
+  bounded, and fully skippable.
 - Free teaser vs. paid full report, designed for conversion ("is it
   interesting?" free vs. "why is it interesting?" paid).
 - Provider-agnostic payment abstraction with a working mock provider (no
@@ -95,8 +102,49 @@ scoring logic, SQL, or prompt text themselves.
   reports are cached so retries never re-trigger OpenAI calls.
 - Lightweight funnel-analytics event log + a CLI to summarize it.
 - `/history` with per-user, ownership-scoped access to past analyses.
-- Alembic migrations, async SQLAlchemy 2.x, pytest suite (190+ tests), ruff +
+- Alembic migrations, async SQLAlchemy 2.x, pytest suite (280+ tests), ruff +
   mypy clean.
+
+## Date-of-birth personalization
+
+Optional layer on top of the serial-number analysis. An analysis without a
+birth date is scored *exactly* as before — the whole feature contributes
+nothing when no date is present, which is what keeps historical results and
+non-participating users unaffected.
+
+**The calculation** (implemented in `app/analysis/birth.py`, documented in
+`app/analysis/rules.py`):
+
+1. **Life-path digit** — the birth date's digits in `DD MM YYYY` order are
+   summed and reduced to a single digit using the *same* reduction the serial
+   number already uses (`reduce_to_single_digit`). No new arithmetic is
+   introduced: `07.03.1990` → `0+7+0+3+1+9+9+0 = 29` → `2+9 = 11` → `1+1 = 2`.
+   Its meaning is read from the existing `DIGIT_MEANINGS` table.
+2. **Resonance** — only objectively checkable relations are used:
+   `same_number` (the serial reduces to the same digit), `present` (the digit
+   literally occurs among the serial's digits), or `absent`.
+3. **Bounded bonus** — resonance adds at most `PERSONAL_RESONANCE_CAP` (2) to
+   the birth digit's own dominant category/ies, selected by the same rule the
+   existing digit-emphasis bonus uses. The cap is deliberately lower than
+   `DIGIT_EMPHASIS_CAP` (3) and far below a digit's base profile (up to 6), so
+   personalization adjusts a reading without ever dominating it. A regression
+   test asserts no sub-score can move by more than the cap.
+
+Same date + same serial always produce the same result: no randomness, no
+hidden state, no dependence on OpenAI.
+
+**Privacy / data minimization:**
+
+- The date is stored once on the user (`users.birth_date`, nullable) so it is
+  asked once rather than per banknote. Each analysis stores only the *derived*
+  numbers it was computed with, so changing the date never rewrites history.
+- The raw date is **never** sent to OpenAI — only `birth_number`,
+  its meaning, `birth_resonance` and `birth_digit_in_serial_count`. Tests
+  assert the date is not reconstructible from the AI payload.
+- The raw date is **never** written to the event log or application logs;
+  events record only whether an analysis was personalized.
+- Users can decline ("Без даты рождения") and still get the full
+  serial-number product, or change the date later with `/birthdate`.
 
 ## Requirements
 
@@ -135,6 +183,30 @@ alembic upgrade head
 alembic revision --autogenerate -m "describe the change"
 alembic upgrade head
 ```
+
+### Upgrading a database that was created by `init_db()`
+
+`init_db()` creates tables directly from the models and does **not** record an
+Alembic revision, so a database that has only ever been started that way has
+no `alembic_version` row. Running `alembic upgrade head` against it fails with
+`table users already exists`, because Alembic tries to replay the initial
+migration. `init_db()` also only creates missing *tables* — it never adds a
+column to an existing one, so a new release's column is simply absent and the
+bot fails on its first query with `no such column`.
+
+Stamp the existing schema once, then upgrade normally from then on:
+
+```bash
+# one-time: record that the initial schema is already present (no DDL runs)
+alembic stamp 24944e1e5e5f
+
+# now apply everything newer, e.g. the users.birth_date column
+alembic upgrade head
+```
+
+Verified against a copy of a real database created by `init_db()`: stamping
+plus upgrading added `users.birth_date` and preserved every existing row
+(users, analyses, payments, events) and every payment status unchanged.
 
 ### PostgreSQL (production)
 
@@ -181,7 +253,7 @@ closes the bot session).
 pytest
 ```
 
-190+ tests cover: input validation, deterministic scoring/pattern detection
+280+ tests cover: input validation, date-of-birth validation and its bounded deterministic effect on scoring, deterministic scoring/pattern detection
 and score bounds (including a regression test against digit-frequency
 double-counting), algorithm determinism, repository operations (including
 user-scoped access control and SQLite foreign-key enforcement), payment

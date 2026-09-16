@@ -67,6 +67,41 @@ def yookassa_payment_kb(
     )
 
 
+def birth_date_kb() -> InlineKeyboardMarkup:
+    """Shown while waiting for a birth date. Skipping is a first-class
+    choice, not a hidden one: the serial-number analysis is a complete
+    product on its own, and a user who would rather not share a date must
+    never be stuck at this step.
+    """
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="➡️ Без даты рождения", callback_data="skip_birth_date")],
+            [InlineKeyboardButton(text="🏠 В начало", callback_data="main_menu")],
+        ]
+    )
+
+
+def payment_recheck_kb(analysis_id: int) -> InlineKeyboardMarkup:
+    """Shown when a payment for this analysis already exists but its payment
+    link can't be handed over right now. Deliberately offers *no* "pay"
+    button: re-checking the existing payment is the only safe action, since
+    minting a second payment for the same analysis risks charging twice. If
+    the existing payment turns out to be canceled/expired, the status check
+    marks it failed, which frees the normal flow to create a fresh one.
+    """
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Я оплатил, проверить статус",
+                    callback_data=f"yookassa_check:{analysis_id}",
+                )
+            ],
+            [InlineKeyboardButton(text="🏠 В начало", callback_data="main_menu")],
+        ]
+    )
+
+
 def after_report_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[

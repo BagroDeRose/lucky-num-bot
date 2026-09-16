@@ -76,6 +76,31 @@ def _teaser_finding(result: AnalysisResult) -> str:
     return "В комбинации уже заметен характер, но чтобы понять его до конца, нужно распутать все цифры вместе."
 
 
+def _personal_line(result: AnalysisResult) -> str | None:
+    """One line about how the number meets this person's birth number.
+
+    Returns None for a serial-only analysis, which keeps the teaser for
+    non-personalized and legacy analyses exactly as it has always been.
+    """
+    if result.birth_number is None:
+        return None
+    if result.birth_resonance == "same_number":
+        return (
+            f"И сразу совпадение: ваше число рождения — {result.birth_number}, "
+            "и купюра сводится к нему же."
+        )
+    if result.birth_resonance == "present":
+        count = result.birth_digit_in_serial_count
+        return (
+            f"Ваше число рождения — {result.birth_number}, и эта цифра есть "
+            f"в самом номере ({count} раз(а))."
+        )
+    return (
+        f"Ваше число рождения — {result.birth_number}; в цифрах этой купюры "
+        "оно не встречается, и это тоже часть картины."
+    )
+
+
 def render_teaser(result: AnalysisResult) -> str:
     """Free teaser shown after analysis, before payment.
 
@@ -88,6 +113,13 @@ def render_teaser(result: AnalysisResult) -> str:
         f"Главное число — <b>{result.reduced_number}</b>.",
         "",
         _teaser_finding(result),
+    ]
+
+    personal = _personal_line(result)
+    if personal:
+        lines += ["", personal]
+
+    lines += [
         "",
         f"Предварительный балл: {result.overall_score}/100.",
         "",
@@ -264,6 +296,42 @@ def _render_special_section(result: AnalysisResult) -> str | None:
     return "\n".join(f"• {line}" for line in lines)
 
 
+def _render_personal_section(result: AnalysisResult) -> str | None:
+    """The birth-date layer of the deterministic report.
+
+    Returns None for serial-only and legacy analyses, so those reports stay
+    byte-for-byte what they were before this feature existed. States only
+    what the analysis actually computed — the life-path digit, its meaning
+    and how it does or doesn't meet the serial — and never the birth date.
+    """
+    if result.birth_number is None or result.birth_number_meaning is None:
+        return None
+
+    lines = [
+        f"Ваше число рождения — {result.birth_number}: "
+        f"{result.birth_number_meaning}."
+    ]
+
+    if result.birth_resonance == "same_number":
+        lines.append(
+            "Купюра сводится ровно к тому же числу — редкий случай, когда "
+            "номер и его владелец говорят на одном языке."
+        )
+    elif result.birth_resonance == "present":
+        lines.append(
+            f"Эта цифра встречается и в самом номере "
+            f"({result.birth_digit_in_serial_count} раз(а)) — тема звучит "
+            "с обеих сторон сразу."
+        )
+    else:
+        lines.append(
+            "В цифрах этой купюры оно не появляется: номер ведёт свою линию, "
+            "а не повторяет вашу."
+        )
+
+    return " ".join(lines)
+
+
 _STRENGTH_PHRASES: dict[str, tuple[tuple[int, str], ...]] = {
     "money": (
         (8, "Денежная тема здесь явно ведущая."),
@@ -432,6 +500,10 @@ def render_fallback_full_report(result: AnalysisResult) -> str:
     special = _render_special_section(result)
     if special:
         parts += ["", "✨ <b>Особые сочетания</b>", special]
+
+    personal = _render_personal_section(result)
+    if personal:
+        parts += ["", "🎂 <b>Ваше число рождения</b>", personal]
 
     parts += [
         "",

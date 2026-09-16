@@ -33,9 +33,13 @@ def _build_ai_payload(result: AnalysisResult) -> dict:
     names) that the report must never expose to the user, so the simplest
     way to guarantee that is to never send them to the model in the first
     place, rather than relying solely on a prompt instruction.
+
+    The same rule governs the birth date: only the *derived* life-path
+    numbers are sent, never the date itself, so the model structurally
+    cannot repeat a user's date of birth back to them.
     """
     digits_present = sorted(set(result.digits))
-    return {
+    payload = {
         "serial_number": result.normalized_number,
         "digits": result.digits,
         "digit_sum": result.digit_sum,
@@ -54,6 +58,19 @@ def _build_ai_payload(result: AnalysisResult) -> dict:
         "stability_score": result.stability_score,
         "overall_score": result.overall_score,
     }
+
+    # Birth-date personalization, added only when the analysis actually has
+    # it — a serial-only or pre-feature analysis sends a payload identical to
+    # what it always sent. The raw birth date is deliberately NOT included:
+    # the model needs the derived life-path digit, its meaning and how it
+    # meets the serial, and nothing about the actual date can improve that.
+    if result.birth_number is not None:
+        payload["birth_number"] = result.birth_number
+        payload["birth_number_meaning"] = result.birth_number_meaning
+        payload["birth_resonance"] = result.birth_resonance
+        payload["birth_digit_in_serial_count"] = result.birth_digit_in_serial_count
+
+    return payload
 
 
 async def generate_report(result: AnalysisResult) -> str:

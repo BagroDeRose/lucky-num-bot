@@ -50,6 +50,19 @@ class AnalysisResult(BaseModel):
     repeated_pairs: list[str]
     detected_patterns: list[DetectedPattern]
 
+    # Birth-date personalization. All optional and defaulted so an analysis
+    # stored before this feature existed still validates unchanged — see
+    # app.database.repositories.get_analysis / history rendering, which
+    # re-validate historical analysis_payload JSON.
+    #
+    # The raw birth date is deliberately NOT part of this model: only the
+    # derived digits are needed to render or narrate a report, so the date
+    # itself never reaches the analysis payload, the AI, or the logs.
+    birth_number: int | None = None
+    birth_number_meaning: str | None = None
+    birth_resonance: str | None = None
+    birth_digit_in_serial_count: int = 0
+
     money_score: int
     luck_score: int
     growth_score: int
@@ -57,6 +70,11 @@ class AnalysisResult(BaseModel):
     overall_score: int
 
     score_breakdown: ScoreBreakdown
+
+    @property
+    def is_personalized(self) -> bool:
+        """True when this analysis was computed with a birth date."""
+        return self.birth_number is not None
 
     def model_dump_public(self) -> dict:
         """A JSON-friendly dict (dict keys as strings) for storage/AI input."""

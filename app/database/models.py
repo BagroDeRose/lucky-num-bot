@@ -5,7 +5,17 @@ from __future__ import annotations
 import datetime as dt
 from enum import StrEnum
 
-from sqlalchemy import JSON, BigInteger, Boolean, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import (
+    JSON,
+    BigInteger,
+    Boolean,
+    Date,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -32,6 +42,14 @@ class User(Base):
     # range that a plain Integer would map to under a future Postgres move.
     telegram_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True, nullable=False)
     username: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Optional birth date for personalized analyses. Nullable because it is
+    # genuinely optional: users can decline and still get the full
+    # serial-number product, and every user who existed before this column
+    # was added simply has NULL. Stored on the user (not per analysis) so it
+    # is asked once and reused across banknotes; the *derived* numbers each
+    # analysis was computed with live in that analysis's own payload, so
+    # changing this date never rewrites past results.
+    birth_date: Mapped[dt.date | None] = mapped_column(Date, nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
     analyses: Mapped[list[Analysis]] = relationship(back_populates="user")
