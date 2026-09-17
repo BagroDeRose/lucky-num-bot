@@ -37,11 +37,20 @@ def get_openai_client() -> AsyncOpenAI:
     return _client
 
 
-async def complete_chat(system_prompt: str, user_prompt: str) -> str:
+async def complete_chat(
+    system_prompt: str, user_prompt: str, *, response_format: dict | None = None
+) -> str:
     """Single non-streaming chat completion. Raises on failure — callers are
     responsible for graceful degradation (see app.ai.report_generator).
+
+    `response_format` is passed through unchanged when given (the report uses
+    {"type": "json_object"} so its sections can be validated structurally);
+    model, token budget, temperature and timeout are unaffected by it.
     """
     client = get_openai_client()
+    extra: dict = {}
+    if response_format is not None:
+        extra["response_format"] = response_format
     response = await client.chat.completions.create(
         model=settings.openai_model,
         messages=[
@@ -69,6 +78,7 @@ async def complete_chat(system_prompt: str, user_prompt: str) -> str:
         # target length itself came down, not because of anything model-
         # specific.
         max_completion_tokens=1400,
+        **extra,
     )
     choice = response.choices[0]
     content = choice.message.content

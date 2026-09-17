@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock
 
+from _report_fakes import valid_report_json
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.analysis.engine import analyze
@@ -295,8 +296,8 @@ async def test_get_report_recovers_a_paid_analysis_with_no_report_yet(
 
     from app.ai import report_generator
 
-    async def fake_complete_chat(system_prompt: str, user_prompt: str) -> str:
-        return "Восстановленный отчёт."
+    async def fake_complete_chat(system_prompt: str, user_prompt: str, **kwargs) -> str:
+        return valid_report_json("Восстановленный отчёт.")
 
     monkeypatch.setattr(report_generator, "complete_chat", fake_complete_chat)
 
@@ -304,12 +305,13 @@ async def test_get_report_recovers_a_paid_analysis_with_no_report_yet(
     await cb_get_report(callback, session, user)
 
     sent_texts = [c.args[1] for c in callback.bot.send_message.await_args_list]
-    assert "Восстановленный отчёт." in sent_texts
+    assert any("Восстановленный отчёт." in t for t in sent_texts)
 
     # No new payment was created — the existing paid state was honored, not re-charged.
     assert await repo.get_latest_pending_payment(session, analysis.id, user.id) is None
     await session.refresh(analysis)
-    assert analysis.report == "Восстановленный отчёт."
+    assert analysis.report is not None
+    assert "Восстановленный отчёт." in analysis.report
 
 
 async def test_get_report_acknowledges_callback_before_slow_yookassa_call(
@@ -472,9 +474,9 @@ async def test_report_reuse_does_not_depend_on_in_memory_lock_surviving(
 
     call_count = {"n": 0}
 
-    async def fake_complete_chat(system_prompt: str, user_prompt: str) -> str:
+    async def fake_complete_chat(system_prompt: str, user_prompt: str, **kwargs) -> str:
         call_count["n"] += 1
-        return "Стабильный отчёт."
+        return valid_report_json("Стабильный отчёт.")
 
     monkeypatch.setattr(report_generator, "complete_chat", fake_complete_chat)
 
@@ -493,7 +495,9 @@ async def test_report_reuse_does_not_depend_on_in_memory_lock_surviving(
     # 1. Generate + 2. save the report for real (no cache yet).
     await payment_module._deliver_report(send, session, analysis, user)
     assert call_count["n"] == 1
-    assert sent == ["Стабильный отчёт."]
+    assert len(sent) == 1
+    assert "Стабильный отчёт." in sent[0]
+    first_report = sent[0]
 
     # 3. Release process-level state — the restart proxy.
     payment_module._report_generation_locks.clear()
@@ -503,7 +507,7 @@ async def test_report_reuse_does_not_depend_on_in_memory_lock_surviving(
     await payment_module._deliver_report(send, session, analysis, user)
 
     assert call_count["n"] == 1, "a second delivery must not call OpenAI again"
-    assert sent == ["Стабильный отчёт.", "Стабильный отчёт."]
+    assert sent == [first_report, first_report], "the stored report must be reused verbatim"
 
 
 async def test_generation_attempt_limit_stops_further_openai_calls_after_repeated_failures(
@@ -529,7 +533,9 @@ async def test_generation_attempt_limit_stops_further_openai_calls_after_repeate
 
     call_count = {"n": 0}
 
-    async def always_failing_complete_chat(system_prompt: str, user_prompt: str) -> str:
+    async def always_failing_complete_chat(
+        system_prompt: str, user_prompt: str, **kwargs
+    ) -> str:
         call_count["n"] += 1
         raise RuntimeError("persistent upstream failure")
 

@@ -11,14 +11,18 @@ import json
 
 from app.ai.client import complete_chat
 from app.ai.prompts import REPORT_USER_TEMPLATE, SYSTEM_PROMPT
+from app.ai.report_contract import ReportContractError, build_report
 from app.analysis.interpreter import render_fallback_full_report
 from app.analysis.models import AnalysisResult
 from app.analysis.rules import DIGIT_MEANINGS
 from app.config import settings
-from app.formatting import to_telegram_html, truncate_telegram_html
 from app.logging import get_logger
 
 logger = get_logger(__name__)
+
+# JSON mode guarantees syntactically valid JSON, which lets the report be
+# assembled from validated sections instead of trusting free-form text.
+REPORT_RESPONSE_FORMAT = {"type": "json_object"}
 
 
 class ReportGenerationError(Exception):
@@ -89,12 +93,21 @@ async def generate_report(result: AnalysisResult) -> str:
     user_prompt = REPORT_USER_TEMPLATE.format(analysis_json=analysis_json)
 
     try:
-        raw_text = await complete_chat(SYSTEM_PROMPT, user_prompt)
+        raw_text = await complete_chat(
+            SYSTEM_PROMPT, user_prompt, response_format=REPORT_RESPONSE_FORMAT
+        )
     except Exception as exc:  # noqa: BLE001 - convert any SDK error into our error type
         logger.warning("OpenAI report generation failed: %s", type(exc).__name__)
         raise ReportGenerationError(str(exc)) from exc
 
-    return truncate_telegram_html(to_telegram_html(raw_text))
+    # The model supplies prose bodies only; every heading and every number is
+    # rendered from `result`, so a score shown to the user is always the
+    # canonical one (see app.ai.report_contract for the incident behind this).
+    try:
+        return build_report(raw_text, result)
+    except ReportContractError as exc:
+        logger.warning("AI report rejected by contract: %s", exc)
+        raise ReportGenerationError(str(exc)) from exc
 
 
 async def generate_report_with_fallback(result: AnalysisResult) -> str:

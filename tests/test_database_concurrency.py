@@ -24,6 +24,7 @@ from pathlib import Path
 
 import pytest
 import pytest_asyncio
+from _report_fakes import valid_report_json
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -231,10 +232,10 @@ async def test_concurrent_report_delivery_does_not_double_call_openai(file_engin
 
     call_count = {"n": 0}
 
-    async def fake_complete_chat(system_prompt: str, user_prompt: str) -> str:
+    async def fake_complete_chat(system_prompt: str, user_prompt: str, **kwargs) -> str:
         call_count["n"] += 1
         await asyncio.sleep(0.05)  # widen the race window past the DB round-trips
-        return "Готовый отчёт."
+        return valid_report_json("Готовый отчёт.")
 
     monkeypatch.setattr(report_generator, "complete_chat", fake_complete_chat)
 
@@ -276,6 +277,10 @@ async def test_concurrent_report_delivery_does_not_double_call_openai(file_engin
     await asyncio.gather(*(try_deliver(s, r, u) for s, r, u in loaded))
 
     assert call_count["n"] == 1, f"OpenAI was called {call_count['n']} times for one report"
+    # Every concurrent caller receives the one stored report.
+    assert len(sent_texts) == len(loaded)
+    assert len(set(sent_texts)) == 1
+    assert "Готовый отчёт." in sent_texts[0]
 
 
 async def test_concurrent_report_delivery_cannot_exceed_the_attempt_cap(
@@ -305,7 +310,9 @@ async def test_concurrent_report_delivery_cannot_exceed_the_attempt_cap(
 
     call_count = {"n": 0}
 
-    async def always_failing_complete_chat(system_prompt: str, user_prompt: str) -> str:
+    async def always_failing_complete_chat(
+        system_prompt: str, user_prompt: str, **kwargs
+    ) -> str:
         call_count["n"] += 1
         await asyncio.sleep(0.05)  # widen the race window past the DB round-trips
         raise RuntimeError("persistent upstream failure")

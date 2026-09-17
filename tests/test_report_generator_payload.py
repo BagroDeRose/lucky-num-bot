@@ -130,28 +130,55 @@ def test_payload_is_json_serializable() -> None:
 # --- Static prompt content -----------------------------------------------
 
 
-def test_system_prompt_specifies_exact_score_line_formats() -> None:
-    assert "ДЕНЕЖНЫЙ ПРОФИЛЬ — {money_score}/10" in SYSTEM_PROMPT
-    assert "ПРОФИЛЬ УДАЧИ — {luck_score}/10" in SYSTEM_PROMPT
-    assert "ПРОФИЛЬ РОСТА — {growth_score}/10" in SYSTEM_PROMPT
-    assert "ПРОФИЛЬ СТАБИЛЬНОСТИ — {stability_score}/10" in SYSTEM_PROMPT
-    assert "ИТОГ — {overall_score}/100" in SYSTEM_PROMPT
-
-
-def test_system_prompt_shows_section_headers_explicitly_wrapped_in_bold_tags() -> None:
-    """Regression test: live generations showed inconsistent header bolding
-    (bold in some reports, plain in others) when the instructions only
-    *described* headers as "bold" without showing the literal <b> wrapping
-    in the worked examples — the model partly pattern-matched the unwrapped
-    examples instead. Every header example must now show the literal tag.
+def test_report_renderer_emits_exact_score_heading_formats() -> None:
+    """Score headings used to be templates in the prompt that the model
+    filled in — which is how a mislabelled "💰 ПРОФИЛЬ УДАЧИ — 3/10" reached a
+    user. They are now rendered by the application, so the exact formats are
+    asserted on the renderer's output with the canonical values.
     """
-    assert "🔮 <b>ДЕНЕЖНЫЙ РАЗБОР</b>" in SYSTEM_PROMPT
-    assert "🔢 <b>ГЛАВНОЕ ЧИСЛО — N</b>" in SYSTEM_PROMPT
-    assert "🔎 <b>ИСТОРИЯ ЦИФР</b>" in SYSTEM_PROMPT
-    assert "✨ <b>ОСОБЫЕ СОЧЕТАНИЯ</b>" in SYSTEM_PROMPT
-    assert "💰 <b>ДЕНЕЖНЫЙ ПРОФИЛЬ — {money_score}/10</b>" in SYSTEM_PROMPT
-    assert "⭐ <b>ИТОГ — {overall_score}/100</b>" in SYSTEM_PROMPT
-    assert "💥 <b>ВЕРДИКТ ЖМЫХА</b>" in SYSTEM_PROMPT
+    from _report_fakes import valid_report_json
+
+    from app.ai.report_contract import build_report
+
+    result = analyze("2200373")
+    report = build_report(valid_report_json(), result)
+    assert f"💰 <b>ДЕНЕЖНЫЙ ПРОФИЛЬ — {result.money_score}/10</b>" in report
+    assert f"🍀 <b>ПРОФИЛЬ УДАЧИ — {result.luck_score}/10</b>" in report
+    assert f"🌱 <b>ПРОФИЛЬ РОСТА — {result.growth_score}/10</b>" in report
+    assert f"🛡 <b>ПРОФИЛЬ СТАБИЛЬНОСТИ — {result.stability_score}/10</b>" in report
+    assert f"⭐ <b>ИТОГ — {result.overall_score}/100</b>" in report
+
+
+def test_report_renderer_wraps_every_section_heading_in_bold_tags() -> None:
+    """Originally a prompt regression test: live generations bolded headings
+    inconsistently when the model had to reproduce them. The application now
+    writes every heading itself, so bolding no longer depends on the model.
+    """
+    from _report_fakes import valid_report_json
+
+    from app.ai.report_contract import build_report
+
+    result = analyze("2200373")
+    report = build_report(valid_report_json(), result)
+    assert "🔮 <b>ДЕНЕЖНЫЙ РАЗБОР</b>" in report
+    assert f"🔢 <b>ГЛАВНОЕ ЧИСЛО — {result.reduced_number}</b>" in report
+    assert "🔎 <b>ИСТОРИЯ ЦИФР</b>" in report
+    assert "✨ <b>ОСОБЫЕ СОЧЕТАНИЯ</b>" in report  # 2200373 has repeated pairs
+    assert "💥 <b>ВЕРДИКТ ЖМЫХА</b>" in report
+
+
+def test_system_prompt_leaves_headings_and_scores_to_the_application() -> None:
+    """The prompt must no longer hand the model score templates to fill, and
+    must forbid it from writing scores, headings or recalculations itself.
+    """
+    import re
+
+    assert re.findall(r"\{[a-z_]+_score\}", SYSTEM_PROMPT) == []
+    lowered = SYSTEM_PROMPT.lower()
+    assert "json object" in lowered
+    assert "never write a score" in lowered
+    assert "never write a heading" in lowered
+    assert "never recalculate" in lowered
 
 
 def test_system_prompt_forbids_markdown() -> None:

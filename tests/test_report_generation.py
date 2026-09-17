@@ -6,9 +6,11 @@ from unittest.mock import AsyncMock
 import httpx
 import openai
 import pytest
+from _report_fakes import valid_report_json
 
 from app.ai import client as ai_client
 from app.ai import report_generator
+from app.ai.report_contract import score_headings
 from app.analysis.engine import analyze
 from app.config import settings
 
@@ -27,20 +29,30 @@ async def test_generate_report_raises_when_openai_not_configured(sample_result, 
 async def test_generate_report_returns_ai_text_on_success(sample_result, monkeypatch) -> None:
     monkeypatch.setattr(settings, "openai_api_key", "test-key")
 
-    async def fake_complete_chat(system_prompt: str, user_prompt: str) -> str:
+    async def fake_complete_chat(system_prompt: str, user_prompt: str, **kwargs) -> str:
         assert "2200373" in user_prompt
-        return "Полный отчёт по вашей купюре."
+        # The report is requested as a structured JSON object.
+        assert kwargs["response_format"] == {"type": "json_object"}
+        return valid_report_json("Полный отчёт по вашей купюре.")
 
     monkeypatch.setattr(report_generator, "complete_chat", fake_complete_chat)
 
     text = await report_generator.generate_report(sample_result)
-    assert text == "Полный отчёт по вашей купюре."
+    assert "Полный отчёт по вашей купюре." in text
+    # Headings are rendered by the application with the canonical scores.
+    assert score_headings(text) == {
+        "money_score": [sample_result.money_score],
+        "luck_score": [sample_result.luck_score],
+        "growth_score": [sample_result.growth_score],
+        "stability_score": [sample_result.stability_score],
+        "overall_score": [sample_result.overall_score],
+    }
 
 
 async def test_generate_report_wraps_sdk_errors(sample_result, monkeypatch) -> None:
     monkeypatch.setattr(settings, "openai_api_key", "test-key")
 
-    async def failing_complete_chat(system_prompt: str, user_prompt: str) -> str:
+    async def failing_complete_chat(system_prompt: str, user_prompt: str, **kwargs) -> str:
         raise RuntimeError("boom: upstream unavailable")
 
     monkeypatch.setattr(report_generator, "complete_chat", failing_complete_chat)
@@ -67,7 +79,7 @@ async def test_generate_report_with_fallback_never_raises(sample_result, monkeyp
 async def test_generate_report_wraps_timeout(sample_result, monkeypatch) -> None:
     monkeypatch.setattr(settings, "openai_api_key", "test-key")
 
-    async def timeout_complete_chat(system_prompt: str, user_prompt: str) -> str:
+    async def timeout_complete_chat(system_prompt: str, user_prompt: str, **kwargs) -> str:
         raise TimeoutError("OpenAI request timed out")
 
     monkeypatch.setattr(report_generator, "complete_chat", timeout_complete_chat)
@@ -119,11 +131,11 @@ async def test_generate_report_retry_succeeds_after_prior_failure(sample_result,
     monkeypatch.setattr(settings, "openai_api_key", "test-key")
     calls = {"count": 0}
 
-    async def flaky_complete_chat(system_prompt: str, user_prompt: str) -> str:
+    async def flaky_complete_chat(system_prompt: str, user_prompt: str, **kwargs) -> str:
         calls["count"] += 1
         if calls["count"] == 1:
             raise RuntimeError("transient upstream failure")
-        return "Отчёт готов после повторной попытки."
+        return valid_report_json("Отчёт готов после повторной попытки.")
 
     monkeypatch.setattr(report_generator, "complete_chat", flaky_complete_chat)
 
@@ -131,7 +143,7 @@ async def test_generate_report_retry_succeeds_after_prior_failure(sample_result,
         await report_generator.generate_report(sample_result)
 
     text = await report_generator.generate_report(sample_result)
-    assert text == "Отчёт готов после повторной попытки."
+    assert "Отчёт готов после повторной попытки." in text
     assert calls["count"] == 2
 
 
@@ -261,7 +273,7 @@ async def test_generate_report_recovers_from_truncated_completion(sample_result,
     """
     monkeypatch.setattr(settings, "openai_api_key", "test-key")
 
-    async def truncated_complete_chat(system_prompt: str, user_prompt: str) -> str:
+    async def truncated_complete_chat(system_prompt: str, user_prompt: str, **kwargs) -> str:
         raise RuntimeError("OpenAI response was truncated before completing")
 
     monkeypatch.setattr(report_generator, "complete_chat", truncated_complete_chat)

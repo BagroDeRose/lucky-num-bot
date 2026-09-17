@@ -8,6 +8,7 @@ that doesn't require a live bot/token.
 
 from __future__ import annotations
 
+from _report_fakes import valid_report_json
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai import report_generator
@@ -66,10 +67,10 @@ async def test_full_free_to_paid_flow(session: AsyncSession, monkeypatch) -> Non
 
     calls = {"count": 0}
 
-    async def fake_complete_chat(system_prompt: str, user_prompt: str) -> str:
+    async def fake_complete_chat(system_prompt: str, user_prompt: str, **kwargs) -> str:
         calls["count"] += 1
         assert result.normalized_number in user_prompt
-        return "Ваш персональный отчёт готов."
+        return valid_report_json("Ваш персональный отчёт готов.")
 
     monkeypatch.setattr(report_generator, "complete_chat", fake_complete_chat)
 
@@ -79,7 +80,9 @@ async def test_full_free_to_paid_flow(session: AsyncSession, monkeypatch) -> Non
     await repo.log_event(session, user.id, "report_generation_success", {"analysis_id": analysis.id})
     await session.commit()
 
-    assert analysis.report == "Ваш персональный отчёт готов."
+    assert analysis.report == report_text
+    assert "Ваш персональный отчёт готов." in report_text
+    assert f"ИТОГ — {stored_result.overall_score}/100" in report_text
     assert calls["count"] == 1
 
     # 7. Re-opening the (now cached) report must NOT call OpenAI again.

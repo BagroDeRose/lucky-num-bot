@@ -172,20 +172,33 @@ def _render_opening(result: AnalysisResult) -> str:
     )
 
 
+def render_digit_sum_calculation(result: AnalysisResult) -> str:
+    """The digit-sum arithmetic, one line per reduction step, from canonical
+    values only. Shared by the deterministic report and the AI report so the
+    arithmetic shown to users has exactly one source.
+
+    Every intermediate step is printed: a sum of 29 reads "2 + 9 = 11" then
+    "1 + 1 = 2". Printing a single step straight to the reduced number would
+    show users false arithmetic ("2 + 9 = 2").
+    """
+    lines = [" + ".join(str(d) for d in result.digits) + f" = {result.digit_sum}"]
+    value = result.digit_sum
+    while value >= 10:
+        step = sum(int(ch) for ch in str(value))
+        lines.append(" + ".join(ch for ch in str(value)) + f" = {step}")
+        value = step
+    return "\n".join(lines)
+
+
 def _render_main_number(result: AnalysisResult) -> str:
-    digit_sum = result.digit_sum
     reduced = result.reduced_number
     meaning = DIGIT_MEANINGS[reduced]
-
-    calc_lines = [" + ".join(str(d) for d in result.digits) + f" = {digit_sum}"]
-    if digit_sum >= 10:
-        calc_lines.append(" + ".join(str(d) for d in str(digit_sum)) + f" = {reduced}")
 
     interpretation = (
         f"Так получается главное число — {reduced}. "
         f"{_capitalize(meaning)} — вот что оно вносит в характер всей комбинации."
     )
-    return "\n".join(calc_lines) + "\n\n" + interpretation
+    return render_digit_sum_calculation(result) + "\n\n" + interpretation
 
 
 def _render_digit_story(result: AnalysisResult) -> str:
@@ -256,7 +269,7 @@ def _render_digit_story(result: AnalysisResult) -> str:
     return " ".join(sentences)
 
 
-def _render_special_section(result: AnalysisResult) -> str | None:
+def render_special_section(result: AnalysisResult) -> str | None:
     """Only meaningful, real structural findings — never a generic "adds a
     visual accent" filler. Returns None if there's genuinely nothing to say.
     """
@@ -296,7 +309,7 @@ def _render_special_section(result: AnalysisResult) -> str | None:
     return "\n".join(f"• {line}" for line in lines)
 
 
-def _render_personal_section(result: AnalysisResult) -> str | None:
+def render_personal_section(result: AnalysisResult) -> str | None:
     """The birth-date layer of the deterministic report.
 
     Returns None for serial-only and legacy analyses, so those reports stay
@@ -497,11 +510,11 @@ def render_fallback_full_report(result: AnalysisResult) -> str:
         _render_digit_story(result),
     ]
 
-    special = _render_special_section(result)
+    special = render_special_section(result)
     if special:
         parts += ["", "✨ <b>Особые сочетания</b>", special]
 
-    personal = _render_personal_section(result)
+    personal = render_personal_section(result)
     if personal:
         parts += ["", "🎂 <b>Ваше число рождения</b>", personal]
 
