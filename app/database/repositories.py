@@ -15,11 +15,36 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.analysis.models import AnalysisResult
-from app.database.models import Analysis, Event, Payment, PaymentStatus, User
+from app.database.models import (
+    Analysis,
+    Event,
+    Payment,
+    PaymentStatus,
+    PromoRedemption,
+    RedemptionStatus,
+    User,
+)
 
 
 async def _get_user_by_telegram_id(session: AsyncSession, telegram_id: int) -> User | None:
     result = await session.execute(select(User).where(User.telegram_id == telegram_id))
+    return result.scalar_one_or_none()
+
+
+async def find_user_by_handle(session: AsyncSession, handle: str) -> User | None:
+    """Resolve an admin-typed "@username", "username" or numeric Telegram ID
+    to a user who has started the bot. Username match is case-insensitive
+    (Telegram usernames are). Parameters are bound, never interpolated.
+    """
+    text = handle.strip()
+    if text.lstrip("-").isdigit():
+        return await _get_user_by_telegram_id(session, int(text))
+    name = text.removeprefix("@")
+    if not name:
+        return None
+    result = await session.execute(
+        select(User).where(func.lower(User.username) == name.lower()).order_by(User.id).limit(1)
+    )
     return result.scalar_one_or_none()
 
 
@@ -36,7 +61,7 @@ async def get_or_create_user(
     """
     user = await _get_user_by_telegram_id(session, telegram_id)
     if user is not None:
-        if username and user.username != username:
+        if user.username != username:
             user.username = username
         return user
 
@@ -48,7 +73,7 @@ async def get_or_create_user(
     except IntegrityError:
         user = await _get_user_by_telegram_id(session, telegram_id)
         if user is not None:
-            if username and user.username != username:
+            if user.username != username:
                 user.username = username
             return user
         raise
@@ -112,7 +137,15 @@ async def mark_analysis_paid(session: AsyncSession, analysis: Analysis) -> None:
 
 
 async def save_report(session: AsyncSession, analysis: Analysis, report: str) -> None:
+    """Persist the delivered report and stamp the canonical completion time.
+
+    This is the single moment a report counts as completed for the weekly
+    leaderboard and statistics. The timestamp is only set once, so even a
+    hypothetical second save could never move a report into another week.
+    """
     analysis.report = report
+    if analysis.report_completed_at is None:
+        analysis.report_completed_at = dt.datetime.now(dt.UTC)
     await session.flush()
 
 
@@ -215,6 +248,16 @@ async def mark_payment_failed(session: AsyncSession, payment: Payment) -> None:
     if payment.status == PaymentStatus.PAID:
         return
     payment.status = PaymentStatus.FAILED
+    # A failed payment must never keep a promo discount locked: hand the
+    # reserved activation back to the user for their next purchase.
+    await session.execute(
+        update(PromoRedemption)
+        .where(
+            PromoRedemption.payment_id == payment.id,
+            PromoRedemption.status == RedemptionStatus.RESERVED,
+        )
+        .values(status=RedemptionStatus.APPLIED, payment_id=None, reserved_at=None)
+    )
     await session.flush()
 
 

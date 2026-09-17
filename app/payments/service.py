@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.database import repositories as repo
 from app.database.models import Analysis, Payment
+from app.engagement import promo as promo_service
 from app.logging import get_logger
 from app.payments.provider import PaymentIntent, get_payment_provider
 
@@ -90,11 +91,28 @@ class PaymentService:
             )
             return existing, intent
 
-        intent = await self.provider.create_payment(
-            amount=settings.price_rub,
-            currency=settings.currency,
-            description=description,
+        # Claim the user's best promo activation *before* the provider call
+        # and commit the claim, so one activation can never discount two
+        # payments. A provider failure hands it back below; a crash in
+        # between is healed by promo.STALE_RESERVATION_AFTER.
+        reservation = await promo_service.reserve_best_discount(session, user_id)
+        amount = promo_service.discounted_price(
+            settings.price_rub, reservation.discount_percent if reservation else None
         )
+        if reservation is not None:
+            await session.commit()
+
+        try:
+            intent = await self.provider.create_payment(
+                amount=amount,
+                currency=settings.currency,
+                description=description,
+            )
+        except Exception:
+            if reservation is not None:
+                await promo_service.release_reservation(session, reservation)
+                await session.commit()
+            raise
         payment = await repo.create_pending_payment(
             session,
             user_id=user_id,
@@ -104,6 +122,14 @@ class PaymentService:
             provider=self.provider.name,
             provider_payment_id=intent.provider_payment_id,
         )
+        if reservation is not None:
+            await promo_service.attach_reservation(session, reservation, payment.id)
+            logger.info(
+                "Promo discount %s%% reserved for payment %s (amount=%s)",
+                reservation.discount_percent,
+                payment.id,
+                payment.amount,
+            )
         # Commit before releasing the per-analysis lock. The payment now
         # exists at the provider, so it must be durably recorded here: a
         # later failure rolling this row back would strand a real, payable
@@ -155,6 +181,8 @@ class PaymentService:
             return None
 
         transitioned = await repo.mark_payment_paid(session, payment)
+        # Idempotent: only a reserved activation bound to this payment moves.
+        await promo_service.consume_for_payment(session, payment.id)
         if transitioned:
             logger.info("Payment %s marked paid (analysis_id=%s)", payment.id, payment.analysis_id)
         else:

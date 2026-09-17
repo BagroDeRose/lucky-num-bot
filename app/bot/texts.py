@@ -38,6 +38,9 @@ HELP = (
     "/analyze — проверить купюру\n"
     "/birthdate — указать или изменить дату рождения\n"
     "/history — ваши прошлые разборы\n"
+    "/stats — моя статистика\n"
+    "/top — топ исследователей недели\n"
+    "/promo — ввести промокод\n"
     "/about — о проекте\n"
     "/help — эта справка"
 )
@@ -153,8 +156,32 @@ INVOICE_EXPIRED = "Счёт устарел. Оформите оплату зан
 INVOICE_NO_LONGER_VALID = "Этот счёт больше недействителен. Оформите оплату заново."
 
 
-def payment_intro_text() -> str:
-    text = PAYMENT_INTRO.format(amount=settings.price_rub, currency=settings.currency)
+PAYMENT_DISCOUNT_LINE = "🎟 Скидка {percent}% по промокоду: <s>{base}</s> → {amount} {currency}."
+PAYMENT_DISCOUNT_DEFERRED = (
+    "🎟 Ваш промокод на {percent}% сохранён: этот счёт был выставлен до его "
+    "активации, поэтому скидка применится к следующей новой оплате."
+)
+
+
+def payment_intro_text(
+    amount: int | None = None,
+    discount_percent: int | None = None,
+    deferred_discount_percent: int | None = None,
+) -> str:
+    """`amount` is what this payment actually charges (already discounted);
+    the base price is always settings.price_rub.
+    """
+    charged = settings.price_rub if amount is None else amount
+    text = PAYMENT_INTRO.format(amount=charged, currency=settings.currency)
+    if discount_percent:
+        text += "\n\n" + PAYMENT_DISCOUNT_LINE.format(
+            percent=discount_percent,
+            base=settings.price_rub,
+            amount=charged,
+            currency=settings.currency,
+        )
+    elif deferred_discount_percent:
+        text += "\n\n" + PAYMENT_DISCOUNT_DEFERRED.format(percent=deferred_discount_percent)
     if settings.payment_provider == "mock":
         text += PAYMENT_MOCK_NOTE
     elif settings.payment_provider == "yookassa":

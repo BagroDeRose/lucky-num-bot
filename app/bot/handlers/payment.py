@@ -29,6 +29,7 @@ from app.bot.utils import cb_answer, require_callback_data
 from app.config import settings
 from app.database import repositories as repo
 from app.database.models import Analysis, PaymentStatus, User
+from app.engagement import promo as promo_service
 from app.logging import get_logger
 from app.payments.provider import YooKassaPaymentProvider
 from app.payments.service import PaymentService
@@ -183,6 +184,9 @@ async def cb_get_report(callback: CallbackQuery, session: AsyncSession, user: Us
     await repo.log_event(
         session, user.id, "payment_created", {"analysis_id": analysis.id, "payment_id": payment.id}
     )
+    discount = await promo_service.discount_for_payment(session, payment.id)
+    deferred = None if discount else await promo_service.best_unused_discount(session, user.id)
+    intro = texts.payment_intro_text(intent.amount, discount, deferred)
     await session.commit()
 
     if (
@@ -210,7 +214,7 @@ async def cb_get_report(callback: CallbackQuery, session: AsyncSession, user: Us
         if confirmation_url:
             await cb_answer(
                 callback,
-                texts.payment_intro_text(),
+                intro,
                 reply_markup=yookassa_payment_kb(
                     analysis.id, intent.amount, intent.currency, confirmation_url
                 ),
@@ -228,7 +232,7 @@ async def cb_get_report(callback: CallbackQuery, session: AsyncSession, user: Us
     else:
         await cb_answer(
             callback,
-            texts.payment_intro_text(),
+            intro,
             reply_markup=mock_payment_kb(analysis.id, intent.amount, intent.currency),
         )
 

@@ -36,6 +36,10 @@ def setup_logging() -> None:
     # Quiet down noisy third-party loggers.
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("aiogram.event").setLevel(logging.WARNING)
+    # The startup schema check uses Alembic in-process; its plugin/context
+    # INFO lines are noise in the bot log (the alembic CLI configures its own
+    # logging from alembic.ini and is unaffected).
+    logging.getLogger("alembic").setLevel(logging.WARNING)
 
     _CONFIGURED = True
 

@@ -102,6 +102,9 @@ scoring logic, SQL, or prompt text themselves.
   reports are cached so retries never re-trigger OpenAI calls.
 - Lightweight funnel-analytics event log + a CLI to summarize it.
 - `/history` with per-user, ownership-scoped access to past analyses.
+- Weekly researcher leaderboard, personal statistics, promo codes, TOP-5
+  weekly rewards, a weekly public promo posted to a channel, and an admin
+  panel — see "Leaderboard, promo codes and weekly rewards" below.
 - Alembic migrations, async SQLAlchemy 2.x, pytest suite (280+ tests), ruff +
   mypy clean.
 
@@ -170,8 +173,20 @@ cp .env.example .env
 
 ## Database setup / migrations
 
-The app auto-creates tables on startup via `init_db()` for convenience, but
-schema changes should go through Alembic. Both commands below read
+On startup the bot checks the database schema before doing anything else
+(`app/database/schema.py`):
+
+- an **empty** database is created from the models and stamped at the current
+  Alembic head;
+- a database **at the head** starts normally;
+- anything else — an **older revision** (a release's migration was not
+  applied yet) or tables without any revision — stops the bot with an
+  explicit `Database schema is out of date ... run alembic upgrade head`
+  error. The database is left untouched.
+
+Existing data is never migrated implicitly. After pulling a release that adds
+a migration, back up the database and run `alembic upgrade head` before
+starting the bot. Both commands below read
 `DATABASE_URL` from `.env` — works against SQLite (local dev) or PostgreSQL
 (production) with no code changes:
 
@@ -186,13 +201,17 @@ alembic upgrade head
 
 ### Upgrading a database that was created by `init_db()`
 
-`init_db()` creates tables directly from the models and does **not** record an
-Alembic revision, so a database that has only ever been started that way has
-no `alembic_version` row. Running `alembic upgrade head` against it fails with
+Older releases' `init_db()` created tables directly from the models without
+recording an Alembic revision, so a database that has only ever been started
+that way has no `alembic_version` row (the startup check now refuses it).
+Running `alembic upgrade head` against it fails with
 `table users already exists`, because Alembic tries to replay the initial
-migration. `init_db()` also only creates missing *tables* — it never adds a
-column to an existing one, so a new release's column is simply absent and the
-bot fails on its first query with `no such column`.
+migration. That old `init_db()` also only created missing *tables* and never
+added columns, which is how a database could end up at an old revision with
+new tables but without a new column (`no such column:
+analyses.report_completed_at`). For a database that *has* a revision, plain
+`alembic upgrade head` repairs that state — migration `c3e9a1f4d2b6` skips
+tables that already exist and adds the missing column.
 
 Stamp the existing schema once, then upgrade normally from then on:
 
@@ -291,7 +310,104 @@ can be summarized with:
 python scripts/funnel_stats.py
 ```
 
-No admin dashboard is included by design — this is an MVP.
+Business numbers (users, completed reports, paid payments, revenue, promo
+usage) are also available in the Telegram admin panel (`/admin`).
+
+## Leaderboard, promo codes and weekly rewards
+
+### What counts as a report
+
+A report counts once, at the moment the paid report is saved
+(`analyses.report_completed_at`, stamped in `repositories.save_report`).
+Unpaid/cancelled payments and failed AI generations never save a report, and
+an analysis has at most one report, so nothing is double-counted. The
+migration backfills this timestamp for existing reports from the
+`report_generation_success` event (or the analysis creation time).
+
+### Weeks and ranking
+
+A week is Monday 00:00:00 – Sunday 23:59:59 in `APP_TIMEZONE` (default
+`+03:00`). Ranking inside a week is deterministic:
+
+1. more completed reports first;
+2. on a tie, whoever reached that count earlier (earlier last counted report);
+3. still tied: lower internal user id.
+
+The current week is computed live. A finished week is frozen into
+`weekly_leaderboards` / `weekly_leaderboard_entries` (with stored ranks and a
+username snapshot) and never recomputed. Users are shown only by public
+@username, or as "Исследователь без ника" — never by Telegram ID.
+
+### User screens
+
+Main menu buttons (and commands): 📊 Моя статистика (`/stats` — lifetime
+reports, this week, current rank, weekly streak), 🏆 Топ исследователей
+(`/top` — top 10 of the week plus your own position), 🎟 Промокод (`/promo`).
+
+### Promo codes
+
+Types: `weekly_public`, `top_reward` (personal), `admin_manual`. Codes are
+case-insensitive and globally unique. Entering a valid code *activates* it
+(counts toward `max_activations`; one activation per user per code). The
+activation is spent on the user's next **new** payment:
+
+- `applied` → `reserved` (claimed atomically before the provider payment is
+  created) → `consumed` (payment succeeded). A failed/cancelled payment or a
+  provider error returns it to `applied`.
+- Price = `max(1, PRICE_RUB * (100 - percent) // 100)` in integer rubles
+  (99 → 25% = 74, 50% = 49). Discounts never stack: the best one is used.
+  `PRICE_RUB` itself never changes.
+- Activation is atomic: a conditional `UPDATE ... WHERE activations_count <
+  max_activations` plus `UNIQUE(promo_code_id, user_id)` inside a savepoint,
+  backed by a CHECK constraint, so concurrent users can never exceed the limit.
+
+### The Monday job
+
+`app/engagement/automation.py` (run by the in-process scheduler at
+`WEEKLY_SCHEDULE_TIME` on Monday, once at startup as a catch-up, and by the
+admin "run now" button — the same code):
+
+1. finalize the previous week (snapshot with ranks);
+2. create a personal `TOP_REWARD_DISCOUNT_PERCENT` one-time code for each of
+   the TOP-5 and DM it. The code is valid for `TOP_REWARD_VALID_DAYS` local
+   calendar days counting the day it is issued (issued Monday → through
+   Sunday; issued late on Wednesday → still 7 days, through Tuesday);
+3. create the week's public code (`LUCKY-XXXX`, `WEEKLY_PROMO_DISCOUNT_PERCENT`,
+   `WEEKLY_PROMO_MAX_ACTIVATIONS`, valid for the new week) and deactivate the
+   previous public codes;
+4. post the TOP-5 and the public code to `PROMO_CHANNEL_ID`.
+
+Every step is idempotent through database state (unique constraints and
+conditional-UPDATE claims), not in-memory flags: re-running, restarting or a
+second process never finalizes twice, issues a second code or re-sends a
+delivered message. Failed deliveries are recorded (`weekly_rewards.
+delivery_status/error`, `weekly_leaderboards.channel_status/error`) with
+Telegram's reason, which is also logged and shown in the admin run report.
+Failures are retried automatically up to 3 attempts; a user who blocked the
+bot or whose chat is not found is not retried automatically. Admins can retry
+both from the history view.
+If a scheduled run fails (an exception, or a phase that recorded an error) or
+leaves failed deliveries with automatic attempts remaining, the scheduler
+retries after 10 min, 20 min, 40 min, … (capped at 6 hours, and never later
+than the next regular Monday run) instead of waiting a week — the next Monday
+run processes a different week and would never retry them.
+
+`Bad Request: chat not found` for the **channel post** means `PROMO_CHANNEL_ID`
+is wrong or the bot is not a member (administrator with "Post messages") of
+that channel. For a **reward DM** it means that user has never started *this*
+bot (for example the bot token was changed) — Telegram bots cannot message
+users first.
+
+### Admin panel
+
+Set `ADMIN_TELEGRAM_ID` and send `/admin` (a 🛠 button also appears in the
+main menu for admins). Every admin message and button is authorized on the
+server; everyone else gets "⛔ Доступ запрещён.". Features: statistics, live
+leaderboard, finalized-week history with reward and channel statuses, retry
+rewards / channel post, active and expired promo codes with usage details,
+create / deactivate codes, grant a personal code to a user (by @username or
+Telegram ID, delivered by DM), a plain-text message to one user, and running
+the weekly job manually.
 
 ## Environment variables
 
@@ -313,6 +429,15 @@ See [`.env.example`](.env.example) for the full list. Summary:
 | `PRICE_RUB` | No | Integer price of the full report. Defaults to 99. The server is always the source of truth for this — never trusted from client/callback input. |
 | `CURRENCY` | No | Defaults to `RUB`. |
 | `LOG_LEVEL` | No | Defaults to `INFO`. |
+| `ADMIN_TELEGRAM_ID` | No | Admin Telegram user ID(s), comma-separated. Empty disables the admin panel. |
+| `PROMO_CHANNEL_ID` | No | Channel for the weekly post: numeric chat ID or `@channelname`; the bot must be a channel admin. Empty skips the post. |
+| `APP_TIMEZONE` | No | Defines the leaderboard week. Defaults to `+03:00`. IANA names need the `tzdata` package where the OS has no zone database (e.g. Windows). Validated at startup. |
+| `WEEKLY_SCHEDULE_TIME` | No | Monday run time, `HH:MM` local. Defaults to `00:05`. |
+| `WEEKLY_PROMO_DISCOUNT_PERCENT` | No | Defaults to `25`. |
+| `WEEKLY_PROMO_MAX_ACTIVATIONS` | No | Defaults to `100`. |
+| `TOP_REWARD_DISCOUNT_PERCENT` | No | Defaults to `50`. |
+| `TOP_REWARD_VALID_DAYS` | No | Defaults to `7`. |
+| `WEEKLY_AUTOMATION_ENABLED` | No | Defaults to `true`; `false` disables the scheduler (manual admin run still works). |
 
 ## Payment integration point
 
@@ -487,8 +612,23 @@ rewrites:
   scope; add if/when deployment needs grow.
 - `MockPaymentProvider` moves no real money; it exists purely to exercise
   the full flow before real payment credentials are available.
-- No admin web dashboard; use `scripts/funnel_stats.py` for basic funnel
-  numbers.
+- No admin web dashboard; use the Telegram admin panel (`/admin`) or
+  `scripts/funnel_stats.py` for basic funnel numbers.
+- Weekly automation finalizes only the week before the run. If the bot is
+  down for an entire week or longer, the older missed week is not finalized
+  retroactively.
+- A promo code activated after an invoice was already issued for an analysis
+  applies to the next *new* payment; the pending invoice keeps its amount
+  (re-pricing a payable provider payment could charge twice). The user is
+  told this in the payment message.
+- On the very first start after deploying the leaderboard, the startup
+  catch-up finalizes the previous week from backfilled data and sends its
+  TOP-5 rewards and channel post. Set `WEEKLY_AUTOMATION_ENABLED=false` for
+  the first start if that is not wanted.
+- Under SQLite, two bot processes running the weekly job at the same moment
+  can make one of them fail a step with "database is locked"; the failure is
+  recorded and the next run completes it — nothing is duplicated. Run a
+  single bot process (as documented) or use PostgreSQL.
 - SQLite is for local development/tests only; production deployments must
   set `DATABASE_URL` to PostgreSQL (see "PostgreSQL (production)" above) —
   SQLite allows only one writer at a time and will raise "database is

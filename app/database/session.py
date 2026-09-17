@@ -6,7 +6,7 @@ from sqlalchemy import event
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.config import settings
-from app.database.models import Base
+from app.database.schema import prepare_database
 
 engine = create_async_engine(settings.database_url, echo=False)
 async_session_factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -45,11 +45,13 @@ def _configure_sqlite_connection(dbapi_connection: object, connection_record: ob
 
 
 async def init_db() -> None:
-    """Create tables if they don't exist yet.
+    """Make sure the database schema matches this code before the bot starts.
 
-    For production schema evolution use Alembic migrations (see
-    app/database/migrations). This is kept for fast local/dev bootstrap and
-    for the test suite.
+    An empty database is bootstrapped from the models and stamped at the
+    Alembic head; a database at the head is left alone; anything else raises
+    SchemaOutOfDateError (run `alembic upgrade head`). This used to call
+    `create_all` unconditionally, which on an out-of-date database created
+    new tables but could not add new columns, so the bot started on a
+    half-upgraded schema and failed at runtime.
     """
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    await prepare_database(engine)

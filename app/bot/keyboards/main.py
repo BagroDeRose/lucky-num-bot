@@ -7,16 +7,41 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from app.database.models import Analysis
 
 
-def main_menu_kb() -> InlineKeyboardMarkup:
+def main_menu_kb(is_admin: bool = False) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text="🔎 Проверить купюру", callback_data="analyze_new")],
+        [InlineKeyboardButton(text="📜 История", callback_data="history")],
+        [
+            InlineKeyboardButton(text="📊 Моя статистика", callback_data="my_stats"),
+            InlineKeyboardButton(text="🏆 Топ исследователей", callback_data="top"),
+        ],
+        [InlineKeyboardButton(text="🎟 Промокод", callback_data="promo")],
+        [
+            InlineKeyboardButton(text="ℹ️ О проекте", callback_data="about"),
+            InlineKeyboardButton(text="❓ Помощь", callback_data="help"),
+        ],
+    ]
+    if is_admin:
+        # Only a convenience: every admin action is re-checked server-side.
+        rows.append([InlineKeyboardButton(text="🛠 Админ-панель", callback_data="adm:menu")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def engagement_back_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🔎 Проверить купюру", callback_data="analyze_new")],
-            [InlineKeyboardButton(text="📜 История", callback_data="history")],
             [
-                InlineKeyboardButton(text="ℹ️ О проекте", callback_data="about"),
-                InlineKeyboardButton(text="❓ Помощь", callback_data="help"),
+                InlineKeyboardButton(text="📊 Статистика", callback_data="my_stats"),
+                InlineKeyboardButton(text="🏆 Топ", callback_data="top"),
             ],
+            [InlineKeyboardButton(text="🏠 В начало", callback_data="main_menu")],
         ]
+    )
+
+
+def promo_input_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="🏠 В начало", callback_data="main_menu")]]
     )
 
 

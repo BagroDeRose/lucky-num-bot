@@ -52,6 +52,49 @@ class Settings(BaseSettings):
 
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 
+    # --- Researcher leaderboard, promo codes, weekly automation -------------
+    # Comma-separated Telegram user IDs allowed into the admin panel. Empty
+    # means nobody is an admin. Checked server-side on every admin action.
+    admin_telegram_ids_raw: str = Field(default="", alias="ADMIN_TELEGRAM_ID")
+    # Numeric Telegram channel ID (e.g. -1001234567890) for the weekly post.
+    # Empty disables channel publication (recorded as skipped, never crashes).
+    promo_channel_id_raw: str = Field(default="", alias="PROMO_CHANNEL_ID")
+    # Timezone that defines the Monday-Sunday leaderboard week. Accepts a
+    # fixed UTC offset ("+03:00") or an IANA name ("Europe/Moscow"). IANA names
+    # need the tz database; Windows Python has none unless `tzdata` is
+    # installed, so the default is the offset Moscow has used since 2014.
+    app_timezone: str = Field(default="+03:00", alias="APP_TIMEZONE")
+    # Local time (HH:MM) on Monday when the weekly job runs. A few minutes
+    # after midnight keeps it clear of reports landing exactly on the boundary.
+    weekly_schedule_time: str = Field(default="00:05", alias="WEEKLY_SCHEDULE_TIME")
+    weekly_promo_discount_percent: int = Field(default=25, alias="WEEKLY_PROMO_DISCOUNT_PERCENT")
+    weekly_promo_max_activations: int = Field(default=100, alias="WEEKLY_PROMO_MAX_ACTIVATIONS")
+    top_reward_discount_percent: int = Field(default=50, alias="TOP_REWARD_DISCOUNT_PERCENT")
+    top_reward_valid_days: int = Field(default=7, alias="TOP_REWARD_VALID_DAYS")
+    weekly_automation_enabled: bool = Field(default=True, alias="WEEKLY_AUTOMATION_ENABLED")
+
+    @property
+    def admin_telegram_ids(self) -> frozenset[int]:
+        """Parsed admin IDs. Malformed entries are ignored rather than
+        granting access — an unparseable value can never become an admin.
+        """
+        ids: set[int] = set()
+        for part in self.admin_telegram_ids_raw.split(","):
+            part = part.strip()
+            if part.lstrip("-").isdigit():
+                ids.add(int(part))
+        return frozenset(ids)
+
+    @property
+    def promo_channel_id(self) -> int | str | None:
+        """Numeric chat ID (e.g. -1001234567890) or a public @channelname."""
+        value = self.promo_channel_id_raw.strip()
+        if value.lstrip("-").isdigit():
+            return int(value)
+        if value.startswith("@") and len(value) > 1:
+            return value
+        return None
+
     @property
     def openai_configured(self) -> bool:
         return bool(self.openai_api_key)
