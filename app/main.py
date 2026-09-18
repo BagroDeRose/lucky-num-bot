@@ -23,6 +23,7 @@ from app.engagement.channel_check import check_promo_channel
 from app.engagement.periods import app_timezone, parse_schedule_time
 from app.engagement.scheduler import WeeklyScheduler
 from app.logging import get_logger, setup_logging
+from app.single_instance import AlreadyRunningError, SingleInstance
 
 logger = get_logger(__name__)
 
@@ -80,6 +81,14 @@ async def run() -> None:
             "BOT_TOKEN is not configured. Copy .env.example to .env and set BOT_TOKEN."
         )
 
+    # Before the database, the bot and the scheduler: a second instance must
+    # not touch production state or Telegram at all (see app/single_instance.py).
+    with SingleInstance() as instance:
+        logger.info("Single-instance lock acquired (%s)", instance.path)
+        await _run_bot()
+
+
+async def _run_bot() -> None:
     logger.info("Starting LuckyNum bot (payment_provider=%s)", settings.payment_provider)
 
     # Fail at startup, not on Monday, if the week definition is misconfigured.
@@ -145,6 +154,10 @@ def main() -> None:
     except KeyboardInterrupt:
         logger.info("Interrupted, shutting down")
     except SchemaOutOfDateError as exc:
+        setup_logging()
+        logger.error("%s", exc)
+        raise SystemExit(1) from exc
+    except AlreadyRunningError as exc:
         setup_logging()
         logger.error("%s", exc)
         raise SystemExit(1) from exc

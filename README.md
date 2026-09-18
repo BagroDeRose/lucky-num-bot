@@ -550,6 +550,17 @@ DB schema) is provider-agnostic and would not need to change.
 
 ## Deployment notes (simple Linux VPS)
 
+**One instance per machine.** At startup the bot takes an exclusive OS lock on
+`%LOCALAPPDATA%\LuckyNum\bot.lock` (Windows) or `$XDG_RUNTIME_DIR/LuckyNum/bot.lock`
+(otherwise, falling back to `/tmp`). A second process logs
+`Another LuckyNum instance is already running` and exits with code 1 without
+touching the database or Telegram. The lock belongs to the kernel, so it is
+released on exit *and* on a crash — there is no stale lock to clean up, and a
+restart always works. Two instances sharing a bot token would otherwise compete
+for `getUpdates` and trigger Telegram's flood control. The lock is per machine:
+it cannot stop a second instance running on a *different* host with the same
+token.
+
 No Docker/Kubernetes is required for this MVP; a plain systemd service is
 sufficient:
 

@@ -278,7 +278,8 @@ def test_bot_registers_start_and_help_in_the_telegram_command_menu() -> None:
     these commands work when typed — the whole point is that a lost user
     sees them without having to already know they exist.
     """
-    source = inspect.getsource(main_module.run)
+    # The startup path is run() (single-instance lock) wrapping _run_bot().
+    source = inspect.getsource(main_module.run) + inspect.getsource(main_module._run_bot)
     assert "set_my_commands" in source
     assert 'BotCommand(command="start"' in source
     assert 'BotCommand(command="help"' in source
