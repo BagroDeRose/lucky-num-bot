@@ -2,12 +2,25 @@
 
 from __future__ import annotations
 
-from pydantic import Field
+from pathlib import Path
+
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine import make_url
+
+# The directory holding the `app` package, i.e. the project directory. Paths
+# are anchored here rather than to the process working directory: a service
+# unit without WorkingDirectory, a scheduled task or an IDE run configuration
+# would otherwise read no .env at all and open (and, via the startup schema
+# gate, create) a different, empty SQLite database next to wherever it was
+# started from.
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=PROJECT_ROOT / ".env", env_file_encoding="utf-8", extra="ignore"
+    )
 
     bot_token: str = Field(default="", alias="BOT_TOKEN")
 
@@ -46,6 +59,26 @@ class Settings(BaseSettings):
     database_url: str = Field(
         default="sqlite+aiosqlite:///./lucky_num.db", alias="DATABASE_URL"
     )
+
+    @field_validator("database_url")
+    @classmethod
+    def _anchor_relative_sqlite_path(cls, value: str) -> str:
+        """Make a relative SQLite file path absolute against PROJECT_ROOT.
+
+        Only relative SQLite *file* paths change: ":memory:" (the test suite),
+        absolute paths and every other backend (PostgreSQL in production) are
+        returned untouched, so an explicitly configured location always wins.
+        Alembic reads the same setting, so migrations and the bot agree on the
+        file no matter which directory either is run from.
+        """
+        url = make_url(value)
+        if not url.drivername.startswith("sqlite"):
+            return value
+        database = url.database
+        if not database or database == ":memory:" or Path(database).is_absolute():
+            return value
+        anchored = (PROJECT_ROOT / database).resolve()
+        return url.set(database=anchored.as_posix()).render_as_string(hide_password=False)
 
     price_rub: int = Field(default=99, alias="PRICE_RUB")
     currency: str = Field(default="RUB", alias="CURRENCY")

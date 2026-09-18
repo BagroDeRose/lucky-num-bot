@@ -425,7 +425,7 @@ See [`.env.example`](.env.example) for the full list. Summary:
 | `YOOKASSA_SHOP_API_KEY` | If `PAYMENT_PROVIDER=yookassa` | YooKassa shop secret key. |
 | `YOOKASSA_AGENT_ID` | No | YooKassa *agent* (payouts — sending money out) ID. Accepted for forward-compatibility only; this MVP has no payout feature and never uses it. |
 | `YOOKASSA_AGENT_API_KEY` | No | Same caveat as above. |
-| `DATABASE_URL` | No | Defaults to a local SQLite file. |
+| `DATABASE_URL` | No | Defaults to a local SQLite file. A *relative* SQLite path (like the default `./lucky_num.db`) is resolved against the project directory, not the process working directory, so a service started from elsewhere uses the same database instead of creating an empty one. `.env` is read from the project directory for the same reason. Absolute paths and other backends are used exactly as given. |
 | `PRICE_RUB` | No | Integer price of the full report. Defaults to 99. The server is always the source of truth for this — never trusted from client/callback input. |
 | `CURRENCY` | No | Defaults to `RUB`. |
 | `LOG_LEVEL` | No | Defaults to `INFO`. |
